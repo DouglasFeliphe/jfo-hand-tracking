@@ -1,0 +1,22 @@
+{
+  "camera": {
+    "index": 0,
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "mirror": true
+  },
+  "tracking": {
+    "max_hands": 1,
+    "model_complexity": 1,
+    "detection_confidence": 0.70,
+    "tracking_confidence": 0.65,
+    "target_hand": "Right",
+    "show_landmark_indices": false,
+    "show_fps": true
+  },
+  "display": {
+    "window_title": "JFO Hand Tracking - Phase 1",
+    "exit_key": "q"
+  }
+}
