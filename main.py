@@ -8,8 +8,8 @@ import cv2
 
 from hand_tracking.camera import Camera
 from hand_tracking.detector import HandDetector
+from hand_tracking.gestures import GestureRecognizer
 from hand_tracking.landmarks import LandmarkVisualizer
-
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "settings.json"
@@ -20,10 +20,20 @@ def load_config() -> dict:
         return json.load(file)
 
 
+def draw_panel(frame, lines: list[tuple[str, tuple[int, int, int]]]) -> None:
+    panel_width = min(frame.shape[1] - 20, 520)
+    panel_height = 18 + 27 * len(lines)
+    cv2.rectangle(frame, (10, 10), (10 + panel_width, 10 + panel_height), (25, 25, 25), -1)
+    for index, (text, color) in enumerate(lines):
+        cv2.putText(frame, text, (22, 36 + index * 27), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.58, color, 2, cv2.LINE_AA)
+
+
 def main() -> int:
     config = load_config()
     camera_config = config["camera"]
     tracking_config = config["tracking"]
+    gesture_config = config["gestures"]
     display_config = config["display"]
 
     camera = Camera(**camera_config)
@@ -35,19 +45,21 @@ def main() -> int:
         target_hand=tracking_config["target_hand"],
         mirrored_input=camera_config["mirror"],
     )
-    visualizer = LandmarkVisualizer(
-        show_indices=tracking_config["show_landmark_indices"]
-    )
+    recognizer = GestureRecognizer(**gesture_config)
+    visualizer = LandmarkVisualizer(show_indices=tracking_config["show_landmark_indices"])
 
     window_title = display_config["window_title"]
     exit_key = display_config["exit_key"].lower()
+    processing_width = int(display_config.get("processing_width", 640))
     previous_time = time.perf_counter()
     fps = 0.0
+    last_result = None
 
     try:
         camera.open()
         print("[JFO Hand Tracking] Webcam iniciada.")
         print(f"[JFO Hand Tracking] Mão configurada: {tracking_config['target_hand']}.")
+        print("[JFO Hand Tracking] Fase 2: reconhecimento local de Force Push (sem integração com o jogo).")
         print(f"[JFO Hand Tracking] Pressione '{exit_key}' para sair.")
 
         while True:
@@ -56,8 +68,18 @@ def main() -> int:
                 print("[AVISO] Não foi possível ler um frame da webcam.")
                 break
 
-            detections, _ = detector.process(frame)
+            original_height, original_width = frame.shape[:2]
+            if processing_width > 0 and original_width > processing_width:
+                processing_height = round(original_height * processing_width / original_width)
+                processing_frame = cv2.resize(frame, (processing_width, processing_height), interpolation=cv2.INTER_AREA)
+            else:
+                processing_frame = frame
+
+            detections, _ = detector.process(processing_frame)
             visualizer.draw(frame, detections)
+            detection = detections[0] if detections else None
+            result = recognizer.update(detection)
+            last_result = result
 
             now = time.perf_counter()
             delta = now - previous_time
@@ -66,24 +88,27 @@ def main() -> int:
                 instantaneous_fps = 1.0 / delta
                 fps = instantaneous_fps if fps == 0 else (0.9 * fps + 0.1 * instantaneous_fps)
 
-            if detections:
-                status = "RIGHT HAND DETECTED"
-                status_color = (70, 220, 100)
+            if result.state == "GESTURE_DETECTED":
+                state_color = (70, 230, 100)
+            elif result.state == "ARMED":
+                state_color = (0, 220, 255)
+            elif result.state in ("HAND_LOST", "IDLE"):
+                state_color = (0, 165, 255)
             else:
-                status = "SHOW YOUR RIGHT HAND"
-                status_color = (0, 190, 255)
+                state_color = (220, 220, 220)
 
-            cv2.rectangle(frame, (10, 10), (390, 78), (25, 25, 25), -1)
-            cv2.putText(frame, status, (22, 38), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.65, status_color, 2, cv2.LINE_AA)
-            cv2.putText(frame, f"Hands tracked: {len(detections)}", (22, 64),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1,
-                        cv2.LINE_AA)
-
+            lines = [
+                (f"STATE: {result.state}", state_color),
+                (f"GESTURE: {result.message}", state_color),
+                (f"OPEN PALM: {'YES' if result.open_palm else 'NO'}", (220, 220, 220)),
+                (f"PALM SCALE: {result.scale_ratio:.2f}x  |  Z DELTA: {result.z_delta:+.3f}", (220, 220, 220)),
+            ]
             if tracking_config["show_fps"]:
-                cv2.putText(frame, f"FPS: {fps:.1f}", (frame.shape[1] - 125, 32),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255),
-                            2, cv2.LINE_AA)
+                lines.append((f"FPS: {fps:.1f}", (255, 255, 255)))
+            draw_panel(frame, lines)
+
+            if result.triggered:
+                print("[GESTURE] FORCE_PUSH detectado. Nenhum comando foi enviado ao jogo nesta fase.")
 
             cv2.imshow(window_title, frame)
             key = cv2.waitKey(1) & 0xFF

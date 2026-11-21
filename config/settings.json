@@ -8,15 +8,26 @@
   },
   "tracking": {
     "max_hands": 1,
-    "model_complexity": 1,
-    "detection_confidence": 0.70,
+    "model_complexity": 0,
+    "detection_confidence": 0.7,
     "tracking_confidence": 0.65,
     "target_hand": "Right",
     "show_landmark_indices": false,
     "show_fps": true
   },
+  "gestures": {
+    "open_palm_angle": 150.0,
+    "thumb_spread_ratio": 0.42,
+    "arm_stability_seconds": 0.35,
+    "scale_trigger_ratio": 1.15,
+    "scale_strong_ratio": 1.25,
+    "z_trigger_delta": 0.006,
+    "cooldown_seconds": 0.8,
+    "smoothing_samples": 5
+  },
   "display": {
-    "window_title": "JFO Hand Tracking - Phase 1",
-    "exit_key": "q"
+    "window_title": "JFO Hand Tracking - Phase 2",
+    "exit_key": "q",
+    "processing_width": 640
   }
 }
