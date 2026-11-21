@@ -14,7 +14,9 @@ from adapter.input_backend import DryRunBackend, InputBackend, KeyboardBackend
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "settings.json"
-SUPPORTED_ABILITIES = {"FORCE_PUSH"}
+DEFAULT_ABILITIES = frozenset({"FORCE_PUSH"})
+MESSAGE_TYPES = {"ABILITY_START", "ABILITY_STOP", "ABILITY_HEARTBEAT"}
+HANDS = {"RIGHT", "LEFT"}
 PLACEHOLDER_TOKEN = "troque-este-valor"
 MAX_LINE_BYTES = 8192
 
@@ -25,10 +27,12 @@ class AdapterState:
         backend: InputBackend | None = None,
         auth_token: str | None = None,
         dedupe_limit: int = 2048,
+        supported_abilities: set[str] | frozenset[str] | None = None,
     ) -> None:
         self.backend: InputBackend = backend or DryRunBackend()
         self.auth_token = auth_token or None
         self.dedupe_limit = dedupe_limit
+        self.supported_abilities = frozenset(supported_abilities or DEFAULT_ABILITIES)
         self._seen: OrderedDict[tuple[str, int], None] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -43,13 +47,14 @@ class AdapterState:
     def process(self, message: dict[str, Any]) -> tuple[str, str]:
         if not self._token_ok(message):
             return "rejected", "Token inválido."
-        if message.get("type") != "ABILITY_TRIGGER":
+        message_type = message.get("type")
+        if message_type not in MESSAGE_TYPES:
             return "rejected", "Tipo de mensagem não suportado."
         ability = message.get("ability")
-        if ability not in SUPPORTED_ABILITIES:
+        if ability not in self.supported_abilities:
             return "rejected", "Habilidade não suportada."
-        if message.get("hand") != "RIGHT":
-            return "rejected", "A POC aceita somente a mão direita."
+        if message.get("hand") not in HANDS:
+            return "rejected", "Mão inválida."
         session_id = message.get("session_id")
         sequence = message.get("sequence")
         if not isinstance(session_id, str) or not session_id or len(session_id) > 64:
@@ -57,19 +62,27 @@ class AdapterState:
         if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
             return "rejected", "sequence deve ser um inteiro positivo."
 
-        key = (session_id, sequence)
-        with self._lock:
-            if key in self._seen:
-                return "duplicate", "Comando já recebido; não será processado novamente."
-            self._seen[key] = None
-            while len(self._seen) > self.dedupe_limit:
-                self._seen.popitem(last=False)
+        # Heartbeat é idempotente: não entra na janela de deduplicação.
+        if message_type != "ABILITY_HEARTBEAT":
+            key = (f"{message_type}:{session_id}", sequence)
+            with self._lock:
+                if key in self._seen:
+                    return "duplicate", "Comando já recebido; não será processado novamente."
+                self._seen[key] = None
+                while len(self._seen) > self.dedupe_limit:
+                    self._seen.popitem(last=False)
 
-        # Executa fora do lock para não bloquear outras conexões durante o hold da tecla.
         try:
-            return self.backend.execute(ability)
+            if message_type == "ABILITY_START":
+                return self.backend.press(ability)
+            if message_type == "ABILITY_STOP":
+                return self.backend.release(ability)
+            return self.backend.heartbeat(ability)
         except Exception as error:  # o backend nunca deve derrubar o servidor
             return "failed", f"Erro no backend: {error}"
+
+    def close(self) -> None:
+        self.backend.close()
 
 
 class RequestHandler(socketserver.StreamRequestHandler):
@@ -106,7 +119,10 @@ class RequestHandler(socketserver.StreamRequestHandler):
 
             status, detail = self.server.state.process(message)  # type: ignore[attr-defined]
             self._reply(status, detail, message)
-            print(f"[ADAPTER] {message.get('ability')} seq={message.get('sequence')} -> {status} | {detail}")
+            # Heartbeats saudáveis são frequentes; não polui o log.
+            if not (message.get("type") == "ABILITY_HEARTBEAT" and status == "held"):
+                print(f"[ADAPTER] {message.get('type')} {message.get('ability')} "
+                      f"seq={message.get('sequence')} -> {status} | {detail}")
         except OSError as error:
             print(f"[ADAPTER] Erro de conexão: {error}")
 
@@ -142,6 +158,7 @@ def main() -> int:
         parser.error("O adaptador deve escutar somente em localhost.")
 
     token = game.get("auth_token") or None
+    bindings = game.get("bindings", {})
     backend: InputBackend
     if args.mode == "keyboard":
         if sys.platform != "win32":
@@ -150,19 +167,24 @@ def main() -> int:
             parser.error("Defina um game.auth_token próprio em config/settings.json antes de usar o modo keyboard.")
         try:
             backend = KeyboardBackend(
-                bindings=game["bindings"],
+                bindings=bindings,
                 window_title_contains=game.get("window_title_contains", "Jedi"),
                 min_interval=float(game.get("min_interval_seconds", 0.5)),
+                heartbeat_timeout=float(game.get("heartbeat_timeout_seconds", 0.5)),
+                max_hold_seconds=float(game.get("max_hold_seconds", 8.0)),
             )
-        except (KeyError, ValueError, RuntimeError) as error:
+        except (ValueError, RuntimeError) as error:
             parser.error(f"Configuração de teclado inválida: {error}")
     else:
         backend = DryRunBackend()
 
-    server = ThreadedAdapterServer((args.host, args.port), AdapterState(backend, auth_token=token))
+    state = AdapterState(backend, auth_token=token, supported_abilities=set(bindings) or None)
+    server = ThreadedAdapterServer((args.host, args.port), state)
     print(f"[ADAPTER] Escutando em {args.host}:{args.port} | modo={args.mode}")
     if args.mode == "keyboard":
         print(f"[ADAPTER] ATENÇÃO: teclas serão enviadas à janela que contém '{game.get('window_title_contains', 'Jedi')}'.")
+        print(f"[ADAPTER] Soltura automática: sem heartbeat por {game.get('heartbeat_timeout_seconds', 0.5)}s, "
+              f"perda de foco ou {game.get('max_hold_seconds', 8.0)}s no máximo.")
     else:
         print("[ADAPTER] dry_run: recebe e confirma comandos, mas NÃO envia teclas.")
     print("[ADAPTER] Pressione Ctrl+C para encerrar.")
@@ -173,6 +195,7 @@ def main() -> int:
     finally:
         server.shutdown()
         server.server_close()
+        state.close()  # solta qualquer tecla ainda pressionada
     return 0
 
 

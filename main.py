@@ -16,6 +16,8 @@ from communication.client import GameAdapterClient, SendResult
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "settings.json"
 
+ABILITY = "FORCE_PUSH"  # habilidade ligada ao gesto atual (binding em settings.json)
+
 GREEN = (70, 230, 100)
 ORANGE = (0, 165, 255)
 YELLOW = (0, 220, 255)
@@ -49,7 +51,7 @@ def adapter_line(result: SendResult | None) -> tuple[str, tuple[int, int, int]]:
 
 
 def log_result(result: SendResult) -> None:
-    print(f"[TCP] FORCE_PUSH seq={result.sequence} status={result.status} | {result.message}")
+    print(f"[TCP] {result.kind} {ABILITY} seq={result.sequence} status={result.status} | {result.message}")
 
 
 def main() -> int:
@@ -67,7 +69,11 @@ def main() -> int:
         timeout=communication_config.get("timeout_seconds", 0.75),
         auth_token=game_config.get("auth_token"),
     )
-    sender = AsyncSender(adapter_client, on_result=log_result)
+    sender = AsyncSender(
+        adapter_client,
+        on_result=log_result,
+        heartbeat_interval=float(communication_config.get("heartbeat_seconds", 0.15)),
+    )
 
     camera = Camera(**camera_config)
     detector = HandDetector(
@@ -92,7 +98,7 @@ def main() -> int:
         sender.start()
         print("[JFO Hand Tracking] Webcam iniciada.")
         print(f"[JFO Hand Tracking] Mão configurada: {tracking_config['target_hand']}.")
-        print("[JFO Hand Tracking] Fase 4: FORCE_PUSH via TCP -> adaptador -> jogo.")
+        print("[JFO Hand Tracking] Fase 4: gesto -> TCP (START/STOP/HEARTBEAT) -> adaptador -> jogo.")
         print(r"[JFO Hand Tracking] Inicie primeiro: .venv\Scripts\python.exe -m adapter.server")
         print(f"[JFO Hand Tracking] Pressione '{exit_key}' para sair.")
 
@@ -122,7 +128,7 @@ def main() -> int:
                 instantaneous_fps = 1.0 / delta
                 fps = instantaneous_fps if fps == 0 else (0.9 * fps + 0.1 * instantaneous_fps)
 
-            if result.state == "GESTURE_DETECTED":
+            if result.state in ("GESTURE_DETECTED", "HOLDING"):
                 state_color = GREEN
             elif result.state == "ARMED":
                 state_color = YELLOW
@@ -143,8 +149,10 @@ def main() -> int:
                 lines.append((f"FPS: {fps:.1f}", (255, 255, 255)))
             draw_panel(frame, lines)
 
-            if result.triggered and not sender.submit_force_push():
-                print("[AVISO] Fila de envio cheia; comando descartado.")
+            if result.triggered and not sender.start_ability(ABILITY):
+                print("[AVISO] Fila de envio cheia; START descartado.")
+            if result.hold_released and not sender.stop_ability(ABILITY):
+                print("[AVISO] Fila de envio cheia; STOP não enviado (o adaptador solta a tecla sozinho).")
 
             cv2.imshow(window_title, frame)
             key = cv2.waitKey(1) & 0xFF
@@ -157,6 +165,8 @@ def main() -> int:
         print(f"[ERRO] {error}")
         return 1
     finally:
+        if recognizer.holding:
+            sender.stop_ability(ABILITY)  # nunca sai deixando a tecla pressionada
         sender.close()
         camera.close()
         detector.close()

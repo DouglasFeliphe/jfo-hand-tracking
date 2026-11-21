@@ -16,6 +16,7 @@ class GestureResult:
     z_delta: float
     finger_angles: dict[str, float]
     message: str
+    hold_released: bool = False  # True uma única vez: o "segurar" terminou (soltar a tecla)
 
 
 def _xy(landmarks: Any, index: int) -> tuple[float, float]:
@@ -46,7 +47,23 @@ class GestureRecognizer:
 
     MediaPipe's normalized z is used as supporting evidence; apparent palm
     growth is the primary depth cue because monocular z can be noisy.
+
+    After the thrust (`triggered=True`, press the key) the recognizer enters
+    HOLDING while the palm stays open and extended. When the pose ends
+    (palm closes, hand retracts or is lost) it reports `hold_released=True`
+    exactly once (release the key). With `hold_enabled=False` the release is
+    reported on the very next frame, which makes the gesture a plain tap.
     """
+
+    MESSAGES = {
+        "IDLE": "SHOW RIGHT HAND",
+        "TRACKING": "OPEN RIGHT PALM",
+        "ARMED": "ARMED - PUSH FORWARD",
+        "GESTURE_DETECTED": "FORCE PUSH DETECTED",
+        "HOLDING": "HOLDING - CLOSE HAND OR PULL BACK TO RELEASE",
+        "COOLDOWN": "RELEASE HAND TO REARM",
+        "HAND_LOST": "SHOW RIGHT HAND",
+    }
 
     FINGER_JOINTS = {
         "index": (5, 6, 8),
@@ -65,6 +82,10 @@ class GestureRecognizer:
         z_trigger_delta: float = 0.006,
         cooldown_seconds: float = 0.80,
         smoothing_samples: int = 5,
+        hold_enabled: bool = True,
+        hold_release_ratio: float = 1.04,
+        hold_release_seconds: float = 0.15,
+        hold_lost_grace_seconds: float = 0.15,
     ) -> None:
         self.open_palm_angle = open_palm_angle
         self.thumb_spread_ratio = thumb_spread_ratio
@@ -73,6 +94,10 @@ class GestureRecognizer:
         self.scale_strong_ratio = scale_strong_ratio
         self.z_trigger_delta = z_trigger_delta
         self.cooldown_seconds = cooldown_seconds
+        self.hold_enabled = hold_enabled
+        self.hold_release_ratio = hold_release_ratio
+        self.hold_release_seconds = hold_release_seconds
+        self.hold_lost_grace_seconds = hold_lost_grace_seconds
         self._scale_history: deque[float] = deque(maxlen=max(1, smoothing_samples))
         self._z_history: deque[float] = deque(maxlen=max(1, smoothing_samples))
         self.reset()
@@ -84,8 +109,15 @@ class GestureRecognizer:
         self._baseline_z: float | None = None
         self._trigger_time: float | None = None
         self._closed_since: float | None = None
+        self._below_since: float | None = None
+        self._lost_since: float | None = None
         self._scale_history.clear()
         self._z_history.clear()
+
+    @property
+    def holding(self) -> bool:
+        """True while the key should be pressed (from the thrust until hold_released)."""
+        return self.state in ("GESTURE_DETECTED", "HOLDING")
 
     def _measure(self, landmarks: Any) -> tuple[bool, dict[str, float], float, float]:
         angles: dict[str, float] = {}
@@ -122,16 +154,27 @@ class GestureRecognizer:
     def update(self, detection: Any | None, now: float | None = None) -> GestureResult:
         now = time.perf_counter() if now is None else now
         if detection is None:
+            if self.holding and self.hold_lost_grace_seconds > 0:
+                # Tolera perdas curtas de rastreamento sem soltar a tecla.
+                if self._lost_since is None:
+                    self._lost_since = now
+                if now - self._lost_since < self.hold_lost_grace_seconds:
+                    return GestureResult(self.state, False, False, 1.0, 0.0, {}, self.MESSAGES[self.state])
+            was_holding = self.holding
             self.state = "HAND_LOST"
             self._open_since = None
             self._baseline_scale = None
             self._baseline_z = None
             self._trigger_time = None
             self._closed_since = None
+            self._below_since = None
+            self._lost_since = None
             self._scale_history.clear()
             self._z_history.clear()
-            return GestureResult(self.state, False, False, 1.0, 0.0, {}, "SHOW RIGHT HAND")
+            return GestureResult(self.state, False, False, 1.0, 0.0, {}, "SHOW RIGHT HAND",
+                                 hold_released=was_holding)
 
+        self._lost_since = None
         open_palm, angles, raw_scale, raw_z = self._measure(detection.landmarks)
         self._scale_history.append(raw_scale)
         self._z_history.append(raw_z)
@@ -140,6 +183,7 @@ class GestureRecognizer:
         scale_ratio = scale / self._baseline_scale if self._baseline_scale else 1.0
         z_delta = z_value - self._baseline_z if self._baseline_z is not None else 0.0
         triggered = False
+        hold_released = False
 
         if self.state in ("IDLE", "HAND_LOST"):
             self.state = "TRACKING"
@@ -176,7 +220,26 @@ class GestureRecognizer:
                     triggered = True
 
         elif self.state == "GESTURE_DETECTED":
-            self.state = "COOLDOWN"
+            if self.hold_enabled:
+                self.state = "HOLDING"
+                self._below_since = None
+            else:
+                self.state = "COOLDOWN"
+                hold_released = True
+
+        elif self.state == "HOLDING":
+            scale_ratio = scale / max(self._baseline_scale or scale, 1e-6)
+            z_delta = z_value - (self._baseline_z if self._baseline_z is not None else z_value)
+            pose_ended = (not open_palm) or scale_ratio < self.hold_release_ratio
+            if pose_ended:
+                if self._below_since is None:
+                    self._below_since = now
+                if now - self._below_since >= self.hold_release_seconds:
+                    self.state = "COOLDOWN"
+                    self._below_since = None
+                    hold_released = True
+            else:
+                self._below_since = None
 
         elif self.state == "COOLDOWN":
             elapsed = now - (self._trigger_time if self._trigger_time is not None else now)
@@ -193,12 +256,5 @@ class GestureRecognizer:
                 else:
                     self._closed_since = None
 
-        messages = {
-            "IDLE": "SHOW RIGHT HAND",
-            "TRACKING": "OPEN RIGHT PALM",
-            "ARMED": "ARMED - PUSH FORWARD",
-            "GESTURE_DETECTED": "FORCE PUSH DETECTED",
-            "COOLDOWN": "RELEASE HAND TO REARM",
-            "HAND_LOST": "SHOW RIGHT HAND",
-        }
-        return GestureResult(self.state, open_palm, triggered, scale_ratio, z_delta, angles, messages.get(self.state, self.state))
+        return GestureResult(self.state, open_palm, triggered, scale_ratio, z_delta, angles,
+                             self.MESSAGES.get(self.state, self.state), hold_released=hold_released)
