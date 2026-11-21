@@ -10,10 +10,16 @@ from hand_tracking.camera import Camera
 from hand_tracking.detector import HandDetector
 from hand_tracking.gestures import GestureRecognizer
 from hand_tracking.landmarks import LandmarkVisualizer
-from communication.client import GameAdapterClient
+from communication.async_sender import AsyncSender
+from communication.client import GameAdapterClient, SendResult
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "settings.json"
+
+GREEN = (70, 230, 100)
+ORANGE = (0, 165, 255)
+YELLOW = (0, 220, 255)
+GRAY = (220, 220, 220)
 
 
 def load_config() -> dict:
@@ -30,6 +36,22 @@ def draw_panel(frame, lines: list[tuple[str, tuple[int, int, int]]]) -> None:
                     0.58, color, 2, cv2.LINE_AA)
 
 
+def adapter_line(result: SendResult | None) -> tuple[str, tuple[int, int, int]]:
+    """Texto e cor do status do adaptador exibido no painel."""
+    if result is None:
+        return "ADAPTER: NO COMMAND YET", GRAY
+    if not result.delivered:
+        return "ADAPTER: UNAVAILABLE", ORANGE
+    if result.ok:
+        return f"ADAPTER: {result.status.upper()}", GREEN
+    # ACK válido, mas o jogo não recebeu a tecla (foco, intervalo mínimo, falha...).
+    return f"ADAPTER: {result.status.upper()}", YELLOW
+
+
+def log_result(result: SendResult) -> None:
+    print(f"[TCP] FORCE_PUSH seq={result.sequence} status={result.status} | {result.message}")
+
+
 def main() -> int:
     config = load_config()
     camera_config = config["camera"]
@@ -37,12 +59,15 @@ def main() -> int:
     gesture_config = config["gestures"]
     display_config = config["display"]
     communication_config = config.get("communication", {})
+    game_config = config.get("game", {})
+
     adapter_client = GameAdapterClient(
         host=communication_config.get("host", "127.0.0.1"),
         port=communication_config.get("port", 8765),
         timeout=communication_config.get("timeout_seconds", 0.75),
+        auth_token=game_config.get("auth_token"),
     )
-    last_adapter_status = "NOT CONNECTED"
+    sender = AsyncSender(adapter_client, on_result=log_result)
 
     camera = Camera(**camera_config)
     detector = HandDetector(
@@ -61,13 +86,13 @@ def main() -> int:
     processing_width = int(display_config.get("processing_width", 640))
     previous_time = time.perf_counter()
     fps = 0.0
-    last_result = None
 
     try:
         camera.open()
+        sender.start()
         print("[JFO Hand Tracking] Webcam iniciada.")
         print(f"[JFO Hand Tracking] Mão configurada: {tracking_config['target_hand']}.")
-        print("[JFO Hand Tracking] Fase 3: comandos FORCE_PUSH via TCP para o adaptador de teste.")
+        print("[JFO Hand Tracking] Fase 4: FORCE_PUSH via TCP -> adaptador -> jogo.")
         print(r"[JFO Hand Tracking] Inicie primeiro: .venv\Scripts\python.exe -m adapter.server")
         print(f"[JFO Hand Tracking] Pressione '{exit_key}' para sair.")
 
@@ -80,7 +105,8 @@ def main() -> int:
             original_height, original_width = frame.shape[:2]
             if processing_width > 0 and original_width > processing_width:
                 processing_height = round(original_height * processing_width / original_width)
-                processing_frame = cv2.resize(frame, (processing_width, processing_height), interpolation=cv2.INTER_AREA)
+                processing_frame = cv2.resize(frame, (processing_width, processing_height),
+                                              interpolation=cv2.INTER_AREA)
             else:
                 processing_frame = frame
 
@@ -88,7 +114,6 @@ def main() -> int:
             visualizer.draw(frame, detections)
             detection = detections[0] if detections else None
             result = recognizer.update(detection)
-            last_result = result
 
             now = time.perf_counter()
             delta = now - previous_time
@@ -98,34 +123,28 @@ def main() -> int:
                 fps = instantaneous_fps if fps == 0 else (0.9 * fps + 0.1 * instantaneous_fps)
 
             if result.state == "GESTURE_DETECTED":
-                state_color = (70, 230, 100)
+                state_color = GREEN
             elif result.state == "ARMED":
-                state_color = (0, 220, 255)
+                state_color = YELLOW
             elif result.state in ("HAND_LOST", "IDLE"):
-                state_color = (0, 165, 255)
+                state_color = ORANGE
             else:
-                state_color = (220, 220, 220)
+                state_color = GRAY
 
+            adapter_text, adapter_color = adapter_line(sender.last_result)
             lines = [
                 (f"STATE: {result.state}", state_color),
                 (f"GESTURE: {result.message}", state_color),
-                (f"OPEN PALM: {'YES' if result.open_palm else 'NO'}", (220, 220, 220)),
-                (f"PALM SCALE: {result.scale_ratio:.2f}x  |  Z DELTA: {result.z_delta:+.3f}", (220, 220, 220)),
-                (f"ADAPTER: {last_adapter_status}", (70, 230, 100) if last_adapter_status == "ACK RECEIVED" else (0, 165, 255)),
+                (f"OPEN PALM: {'YES' if result.open_palm else 'NO'}", GRAY),
+                (f"PALM SCALE: {result.scale_ratio:.2f}x  |  Z DELTA: {result.z_delta:+.3f}", GRAY),
+                (adapter_text, adapter_color),
             ]
             if tracking_config["show_fps"]:
                 lines.append((f"FPS: {fps:.1f}", (255, 255, 255)))
             draw_panel(frame, lines)
 
-            if result.triggered:
-                send_result = adapter_client.send_force_push()
-                if send_result.ok:
-                    last_adapter_status = "ACK RECEIVED"
-                    print(f"[TCP] FORCE_PUSH seq={send_result.sequence} confirmado pelo adaptador: {send_result.status}")
-                    print(f"[TCP] {send_result.message}")
-                else:
-                    last_adapter_status = "UNAVAILABLE"
-                    print(f"[TCP] Falha ao enviar FORCE_PUSH seq={send_result.sequence}: {send_result.message}")
+            if result.triggered and not sender.submit_force_push():
+                print("[AVISO] Fila de envio cheia; comando descartado.")
 
             cv2.imshow(window_title, frame)
             key = cv2.waitKey(1) & 0xFF
@@ -138,6 +157,7 @@ def main() -> int:
         print(f"[ERRO] {error}")
         return 1
     finally:
+        sender.close()
         camera.close()
         detector.close()
         cv2.destroyAllWindows()

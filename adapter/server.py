@@ -1,25 +1,53 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import socketserver
+import sys
 import threading
-import time
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
+
+from adapter.input_backend import DryRunBackend, InputBackend, KeyboardBackend
+
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = ROOT / "config" / "settings.json"
+SUPPORTED_ABILITIES = {"FORCE_PUSH"}
+PLACEHOLDER_TOKEN = "troque-este-valor"
+MAX_LINE_BYTES = 8192
 
 
 class AdapterState:
-    def __init__(self, dedupe_limit: int = 2048) -> None:
-        self._seen: OrderedDict[tuple[str, int], float] = OrderedDict()
-        self._lock = threading.Lock()
+    def __init__(
+        self,
+        backend: InputBackend | None = None,
+        auth_token: str | None = None,
+        dedupe_limit: int = 2048,
+    ) -> None:
+        self.backend: InputBackend = backend or DryRunBackend()
+        self.auth_token = auth_token or None
         self.dedupe_limit = dedupe_limit
+        self._seen: OrderedDict[tuple[str, int], None] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def _token_ok(self, message: dict[str, Any]) -> bool:
+        if not self.auth_token:
+            return True
+        provided = message.get("token")
+        if not isinstance(provided, str):
+            return False
+        return hmac.compare_digest(provided.encode("utf-8"), self.auth_token.encode("utf-8"))
 
     def process(self, message: dict[str, Any]) -> tuple[str, str]:
+        if not self._token_ok(message):
+            return "rejected", "Token inválido."
         if message.get("type") != "ABILITY_TRIGGER":
             return "rejected", "Tipo de mensagem não suportado."
-        if message.get("ability") != "FORCE_PUSH":
-            return "rejected", "Habilidade não suportada pelo adaptador de teste."
+        ability = message.get("ability")
+        if ability not in SUPPORTED_ABILITIES:
+            return "rejected", "Habilidade não suportada."
         if message.get("hand") != "RIGHT":
             return "rejected", "A POC aceita somente a mão direita."
         session_id = message.get("session_id")
@@ -33,39 +61,54 @@ class AdapterState:
         with self._lock:
             if key in self._seen:
                 return "duplicate", "Comando já recebido; não será processado novamente."
-            self._seen[key] = time.monotonic()
+            self._seen[key] = None
             while len(self._seen) > self.dedupe_limit:
                 self._seen.popitem(last=False)
-        return "received", "Comando recebido pelo adaptador de teste; nenhuma ação foi executada no jogo."
+
+        # Executa fora do lock para não bloquear outras conexões durante o hold da tecla.
+        try:
+            return self.backend.execute(ability)
+        except Exception as error:  # o backend nunca deve derrubar o servidor
+            return "failed", f"Erro no backend: {error}"
 
 
 class RequestHandler(socketserver.StreamRequestHandler):
+    def _reply(self, status: str, detail: str, message: dict[str, Any] | None = None) -> None:
+        message = message or {}
+        ack = {
+            "type": "ACK",
+            "status": status,
+            "session_id": message.get("session_id"),
+            "sequence": message.get("sequence"),
+            "message": detail,
+        }
+        self.wfile.write((json.dumps(ack, ensure_ascii=False) + "\n").encode("utf-8"))
+        self.wfile.flush()
+
     def handle(self) -> None:
         self.request.settimeout(2.0)
         try:
-            raw = self.rfile.readline(8193)
-            if not raw or len(raw) > 8192 or not raw.endswith(b"\n"):
+            raw = self.rfile.readline(MAX_LINE_BYTES + 1)
+            if not raw:
                 return
-            message = json.loads(raw.decode("utf-8"))
-            if not isinstance(message, dict):
-                raise ValueError("A mensagem precisa ser um objeto JSON.")
+            if len(raw) > MAX_LINE_BYTES or not raw.endswith(b"\n"):
+                self._reply("rejected", "Mensagem grande demais ou sem terminador de linha.")
+                print("[ADAPTER] Mensagem rejeitada: tamanho/terminador inválido.")
+                return
+            try:
+                message = json.loads(raw.decode("utf-8"))
+                if not isinstance(message, dict):
+                    raise ValueError("A mensagem precisa ser um objeto JSON.")
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                self._reply("rejected", f"Mensagem inválida: {error}")
+                print(f"[ADAPTER] Mensagem inválida: {error}")
+                return
+
             status, detail = self.server.state.process(message)  # type: ignore[attr-defined]
-            ack = {
-                "type": "ACK",
-                "status": status,
-                "session_id": message.get("session_id"),
-                "sequence": message.get("sequence"),
-                "message": detail,
-            }
-            self.wfile.write((json.dumps(ack, ensure_ascii=False) + "\n").encode("utf-8"))
-            if status == "received":
-                print(f"[ADAPTER] {message['ability']} recebido | mão={message['hand']} | seq={message['sequence']}")
-            elif status == "duplicate":
-                print(f"[ADAPTER] Duplicata ignorada | seq={message.get('sequence')}")
-            else:
-                print(f"[ADAPTER] Comando rejeitado: {detail}")
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-            print(f"[ADAPTER] Mensagem inválida: {error}")
+            self._reply(status, detail, message)
+            print(f"[ADAPTER] {message.get('ability')} seq={message.get('sequence')} -> {status} | {detail}")
+        except OSError as error:
+            print(f"[ADAPTER] Erro de conexão: {error}")
 
 
 class ThreadedAdapterServer(socketserver.ThreadingTCPServer):
@@ -77,16 +120,51 @@ class ThreadedAdapterServer(socketserver.ThreadingTCPServer):
         super().__init__(address, RequestHandler)
 
 
+def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Adaptador TCP local de teste para JFO Hand Tracking")
-    parser.add_argument("--host", default="127.0.0.1", help="Por segurança, use localhost (padrão: 127.0.0.1).")
-    parser.add_argument("--port", type=int, default=8765)
+    config = load_config()
+    game = config.get("game", {})
+    communication = config.get("communication", {})
+
+    parser = argparse.ArgumentParser(description="Adaptador TCP local para JFO Hand Tracking")
+    parser.add_argument("--host", default=communication.get("host", "127.0.0.1"),
+                        help="Por segurança, use localhost (padrão: 127.0.0.1).")
+    parser.add_argument("--port", type=int, default=communication.get("port", 8765))
+    parser.add_argument("--mode", choices=("dry_run", "keyboard"), default=game.get("mode", "dry_run"),
+                        help="dry_run apenas confirma; keyboard injeta teclas no jogo (Windows).")
     args = parser.parse_args()
+
     if args.host not in {"127.0.0.1", "localhost", "::1"}:
-        parser.error("O adaptador de desenvolvimento deve escutar somente em localhost.")
-    server = ThreadedAdapterServer((args.host, args.port), AdapterState())
-    print(f"[ADAPTER] Escutando em {args.host}:{args.port}")
-    print("[ADAPTER] Modo de teste: recebe e confirma comandos, mas NÃO controla o jogo.")
+        parser.error("O adaptador deve escutar somente em localhost.")
+
+    token = game.get("auth_token") or None
+    backend: InputBackend
+    if args.mode == "keyboard":
+        if sys.platform != "win32":
+            parser.error("O modo keyboard só funciona no Windows.")
+        if not token or token == PLACEHOLDER_TOKEN:
+            parser.error("Defina um game.auth_token próprio em config/settings.json antes de usar o modo keyboard.")
+        try:
+            backend = KeyboardBackend(
+                bindings=game["bindings"],
+                window_title_contains=game.get("window_title_contains", "Jedi"),
+                min_interval=float(game.get("min_interval_seconds", 0.5)),
+            )
+        except (KeyError, ValueError, RuntimeError) as error:
+            parser.error(f"Configuração de teclado inválida: {error}")
+    else:
+        backend = DryRunBackend()
+
+    server = ThreadedAdapterServer((args.host, args.port), AdapterState(backend, auth_token=token))
+    print(f"[ADAPTER] Escutando em {args.host}:{args.port} | modo={args.mode}")
+    if args.mode == "keyboard":
+        print(f"[ADAPTER] ATENÇÃO: teclas serão enviadas à janela que contém '{game.get('window_title_contains', 'Jedi')}'.")
+    else:
+        print("[ADAPTER] dry_run: recebe e confirma comandos, mas NÃO envia teclas.")
     print("[ADAPTER] Pressione Ctrl+C para encerrar.")
     try:
         server.serve_forever(poll_interval=0.2)

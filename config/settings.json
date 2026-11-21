@@ -19,14 +19,14 @@
     "open_palm_angle": 150.0,
     "thumb_spread_ratio": 0.42,
     "arm_stability_seconds": 0.35,
-    "scale_trigger_ratio": 1.15,
-    "scale_strong_ratio": 1.25,
-    "z_trigger_delta": 0.006,
+    "scale_trigger_ratio": 1.08,
+    "scale_strong_ratio": 1.18,
+    "z_trigger_delta": 0.004,
     "cooldown_seconds": 0.8,
-    "smoothing_samples": 5
+    "smoothing_samples": 3
   },
   "display": {
-    "window_title": "JFO Hand Tracking - Phase 3",
+    "window_title": "JFO Hand Tracking - Phase 4",
     "exit_key": "q",
     "processing_width": 640
   },
@@ -34,5 +34,14 @@
     "host": "127.0.0.1",
     "port": 8765,
     "timeout_seconds": 0.75
+  },
+  "game": {
+    "mode": "keyboard",
+    "window_title_contains": "Jedi",
+    "auth_token": "e061bc96a10d5b1345851bd1b6c4b4a9",
+    "min_interval_seconds": 0.5,
+    "bindings": {
+      "FORCE_PUSH": { "keys": ["2"], "hold_ms": 80 }
+    }
   }
 }
