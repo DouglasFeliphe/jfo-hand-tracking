@@ -26,8 +26,13 @@
     "smoothing_samples": 5
   },
   "display": {
-    "window_title": "JFO Hand Tracking - Phase 2",
+    "window_title": "JFO Hand Tracking - Phase 3",
     "exit_key": "q",
     "processing_width": 640
+  },
+  "communication": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "timeout_seconds": 0.75
   }
 }

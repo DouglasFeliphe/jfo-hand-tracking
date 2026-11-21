@@ -1,14 +1,18 @@
-# JFO Hand Tracking — Fase 2
+# JFO Hand Tracking — Phase 3
 
-POC de reconhecimento local do gesto de Force Push usando uma única mão direita diante da webcam. Nesta fase, o sistema **não envia comandos ao jogo**.
+POC local para reconhecer o gesto de Force Push com a mão direita e transmitir um comando JSON ao adaptador de teste por TCP em `127.0.0.1:8765`.
+
+> **Importante:** o adaptador desta fase apenas recebe e confirma mensagens. Ele não envia teclas, não injeta comandos e não executa ações dentro de Jedi: Fallen Order.
 
 ## Requisitos
 
 - Windows 10/11
-- Python 3.12 de 64 bits
+- Python 3.12
 - Webcam
 
-## Instalação (PowerShell)
+## Instalação
+
+Na pasta do projeto:
 
 ```powershell
 py -3.12 -m venv .venv
@@ -16,48 +20,71 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## Executar
+Se você já possui o ambiente virtual da Fase 2, pode reutilizá-lo.
+
+## Execução
+
+Abra **dois terminais** na pasta do projeto.
+
+Terminal 1 — iniciar o adaptador TCP de teste:
+
+```powershell
+.\.venv\Scripts\python.exe -m adapter.server
+```
+
+Terminal 2 — iniciar a webcam e o reconhecimento:
 
 ```powershell
 .\.venv\Scripts\python.exe main.py
 ```
 
-Pressione `q` para encerrar.
+Quando o gesto FORCE_PUSH for confirmado, o Python enviará uma mensagem ao adaptador. O adaptador responderá com um ACK contendo o mesmo `session_id` e `sequence`. A janela mostrará `ADAPTER: ACK RECEIVED` quando a confirmação for válida.
 
-## Gesto reconhecido
+Pressione `Q` na janela da webcam para encerrar. Use `Ctrl+C` no terminal do adaptador para encerrá-lo.
 
-1. Mostre a mão direita com a palma aberta.
-2. Mantenha a palma estável por aproximadamente 0,35 segundo.
-3. Quando o estado mudar para `ARMED`, empurre a mão em direção à webcam.
-4. O sistema deverá exibir `FORCE PUSH DETECTED` e registrar o evento no terminal.
-5. Para rearmar, aguarde o cooldown e feche a mão por um breve período.
+## Protocolo
 
-O reconhecimento usa ângulos das articulações para detectar dedos estendidos, separação do polegar, crescimento aparente da palma e variação de profundidade estimada pelo MediaPipe. O aumento aparente da palma é a pista principal; o valor Z é usado como confirmação, pois a estimativa monocular pode oscilar.
+Cada conexão TCP carrega uma mensagem JSON terminada por `\\n`:
 
-## Ajustes
+```json
+{
+  "type": "ABILITY_TRIGGER",
+  "ability": "FORCE_PUSH",
+  "hand": "RIGHT",
+  "session_id": "UUID da execução do cliente",
+  "sequence": 1
+}
+```
 
-Edite `config/settings.json`:
+O ACK contém `type`, `status`, `session_id`, `sequence` e `message`. O adaptador mantém uma janela de identificadores já recebidos para ignorar duplicatas.
 
-- `tracking.model_complexity`: padrão `0`, prioriza velocidade.
-- `display.processing_width`: largura usada na inferência; padrão `640`.
-- `gestures.open_palm_angle`: ângulo mínimo para considerar os quatro dedos estendidos.
-- `gestures.thumb_spread_ratio`: separação mínima do polegar.
-- `gestures.arm_stability_seconds`: tempo de palma aberta para armar.
-- `gestures.scale_trigger_ratio`: aumento mínimo da escala da palma.
-- `gestures.scale_strong_ratio`: aumento forte que pode confirmar o gesto mesmo se Z estiver ruidoso.
-- `gestures.z_trigger_delta`: variação mínima de Z para corroborar o movimento em direção à câmera.
-- `gestures.cooldown_seconds`: intervalo mínimo antes de permitir rearme.
+O servidor escuta somente em localhost por padrão. A confirmação ACK significa **recebimento pelo adaptador**, não execução no jogo.
 
 ## Testes automatizados
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-## Limites desta fase
+## Estrutura
 
-- Apenas a mão direita é considerada.
-- Apenas Force Push é reconhecido.
-- Não há comunicação com Jedi: Fallen Order nesta fase.
-- Os limiares são valores iniciais e deverão ser calibrados com a webcam e iluminação reais.
-- Uma webcam monocular não mede profundidade física com precisão; por isso o reconhecimento combina escala aparente, Z estimado e estabilidade temporal.
+```text
+jfo-hand-tracking/
+├── adapter/
+│   └── server.py
+├── communication/
+│   └── client.py
+├── hand_tracking/
+├── tests/
+│   ├── test_gestures.py
+│   └── test_communication.py
+├── config/settings.json
+├── main.py
+└── requirements.txt
+```
+
+## Limitações conhecidas
+
+- O adaptador é um simulador de integração para validar transporte, formato e confirmação.
+- Não há integração com UE4SS nem com a API de entrada do jogo nesta fase.
+- O cliente abre uma conexão por evento, uma escolha simples e adequada à baixa frequência dos gestos nesta POC.

@@ -10,6 +10,7 @@ from hand_tracking.camera import Camera
 from hand_tracking.detector import HandDetector
 from hand_tracking.gestures import GestureRecognizer
 from hand_tracking.landmarks import LandmarkVisualizer
+from communication.client import GameAdapterClient
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "settings.json"
@@ -35,6 +36,13 @@ def main() -> int:
     tracking_config = config["tracking"]
     gesture_config = config["gestures"]
     display_config = config["display"]
+    communication_config = config.get("communication", {})
+    adapter_client = GameAdapterClient(
+        host=communication_config.get("host", "127.0.0.1"),
+        port=communication_config.get("port", 8765),
+        timeout=communication_config.get("timeout_seconds", 0.75),
+    )
+    last_adapter_status = "NOT CONNECTED"
 
     camera = Camera(**camera_config)
     detector = HandDetector(
@@ -59,7 +67,8 @@ def main() -> int:
         camera.open()
         print("[JFO Hand Tracking] Webcam iniciada.")
         print(f"[JFO Hand Tracking] Mão configurada: {tracking_config['target_hand']}.")
-        print("[JFO Hand Tracking] Fase 2: reconhecimento local de Force Push (sem integração com o jogo).")
+        print("[JFO Hand Tracking] Fase 3: comandos FORCE_PUSH via TCP para o adaptador de teste.")
+        print(r"[JFO Hand Tracking] Inicie primeiro: .venv\Scripts\python.exe -m adapter.server")
         print(f"[JFO Hand Tracking] Pressione '{exit_key}' para sair.")
 
         while True:
@@ -102,13 +111,21 @@ def main() -> int:
                 (f"GESTURE: {result.message}", state_color),
                 (f"OPEN PALM: {'YES' if result.open_palm else 'NO'}", (220, 220, 220)),
                 (f"PALM SCALE: {result.scale_ratio:.2f}x  |  Z DELTA: {result.z_delta:+.3f}", (220, 220, 220)),
+                (f"ADAPTER: {last_adapter_status}", (70, 230, 100) if last_adapter_status == "ACK RECEIVED" else (0, 165, 255)),
             ]
             if tracking_config["show_fps"]:
                 lines.append((f"FPS: {fps:.1f}", (255, 255, 255)))
             draw_panel(frame, lines)
 
             if result.triggered:
-                print("[GESTURE] FORCE_PUSH detectado. Nenhum comando foi enviado ao jogo nesta fase.")
+                send_result = adapter_client.send_force_push()
+                if send_result.ok:
+                    last_adapter_status = "ACK RECEIVED"
+                    print(f"[TCP] FORCE_PUSH seq={send_result.sequence} confirmado pelo adaptador: {send_result.status}")
+                    print(f"[TCP] {send_result.message}")
+                else:
+                    last_adapter_status = "UNAVAILABLE"
+                    print(f"[TCP] Falha ao enviar FORCE_PUSH seq={send_result.sequence}: {send_result.message}")
 
             cv2.imshow(window_title, frame)
             key = cv2.waitKey(1) & 0xFF
