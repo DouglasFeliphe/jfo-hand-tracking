@@ -20,6 +20,7 @@ class SendResult:
     sequence: int
     delivered: bool = True  # um ACK válido foi recebido (False = falha de comunicação)
     kind: str = ""          # START, STOP ou HEARTBEAT
+    ability: str = ""       # habilidade do comando (ex.: FORCE_PUSH)
 
 
 class GameAdapterClient:
@@ -50,6 +51,11 @@ class GameAdapterClient:
         return self._send("ABILITY_HEARTBEAT", ability, hand)
 
     def _send(self, message_type: str, ability: str, hand: str) -> SendResult:
+        result = self._exchange(message_type, ability, hand)
+        result.ability = ability
+        return result
+
+    def _exchange(self, message_type: str, ability: str, hand: str) -> SendResult:
         self.sequence += 1
         sequence = self.sequence
         kind = message_type.removeprefix("ABILITY_")

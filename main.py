@@ -10,13 +10,15 @@ from hand_tracking.camera import Camera
 from hand_tracking.detector import HandDetector
 from hand_tracking.gestures import GestureRecognizer
 from hand_tracking.landmarks import LandmarkVisualizer
+from hand_tracking.pinch import PinchRecognizer
 from communication.async_sender import AsyncSender
 from communication.client import GameAdapterClient, SendResult
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "settings.json"
 
-ABILITY = "FORCE_PUSH"  # habilidade ligada ao gesto atual (binding em settings.json)
+PUSH_ABILITY = "FORCE_PUSH"  # empurrão: palma aberta + avanço
+SLOW_ABILITY = "FORCE_SLOW"  # lentidão: pinça (polegar + indicador)
 
 GREEN = (70, 230, 100)
 ORANGE = (0, 165, 255)
@@ -44,14 +46,37 @@ def adapter_line(result: SendResult | None) -> tuple[str, tuple[int, int, int]]:
         return "ADAPTER: NO COMMAND YET", GRAY
     if not result.delivered:
         return "ADAPTER: UNAVAILABLE", ORANGE
+    label = f"ADAPTER: {result.status.upper()}"
+    if result.ability:
+        label += f" ({result.ability.removeprefix('FORCE_')})"
     if result.ok:
-        return f"ADAPTER: {result.status.upper()}", GREEN
+        return label, GREEN
     # ACK válido, mas o jogo não recebeu a tecla (foco, intervalo mínimo, falha...).
-    return f"ADAPTER: {result.status.upper()}", YELLOW
+    return label, YELLOW
+
+
+def state_color(state: str) -> tuple[int, int, int]:
+    if state in ("GESTURE_DETECTED", "HOLDING"):
+        return GREEN
+    if state == "ARMED":
+        return YELLOW
+    if state in ("HAND_LOST", "IDLE"):
+        return ORANGE
+    return GRAY
 
 
 def log_result(result: SendResult) -> None:
-    print(f"[TCP] {result.kind} {ABILITY} seq={result.sequence} status={result.status} | {result.message}")
+    print(f"[TCP] {result.kind} {result.ability} seq={result.sequence} "
+          f"status={result.status} | {result.message}")
+
+
+def dispatch(sender: AsyncSender, ability: str, result) -> None:
+    """Traduz os eventos de um reconhecedor em START/STOP para o adaptador."""
+    if result.triggered and not sender.start_ability(ability):
+        print(f"[AVISO] Fila de envio cheia; START de {ability} descartado.")
+    if result.hold_released and not sender.stop_ability(ability):
+        print(f"[AVISO] Fila de envio cheia; STOP de {ability} não enviado "
+              "(o adaptador solta a tecla sozinho).")
 
 
 def main() -> int:
@@ -62,6 +87,7 @@ def main() -> int:
     display_config = config["display"]
     communication_config = config.get("communication", {})
     game_config = config.get("game", {})
+    slow_config = dict(config.get("slow_gesture", {}))
 
     adapter_client = GameAdapterClient(
         host=communication_config.get("host", "127.0.0.1"),
@@ -84,7 +110,9 @@ def main() -> int:
         target_hand=tracking_config["target_hand"],
         mirrored_input=camera_config["mirror"],
     )
-    recognizer = GestureRecognizer(**gesture_config)
+    push = GestureRecognizer(**gesture_config)
+    slow_enabled = bool(slow_config.pop("enabled", True))
+    slow = PinchRecognizer(**slow_config) if slow_enabled else None
     visualizer = LandmarkVisualizer(show_indices=tracking_config["show_landmark_indices"])
 
     window_title = display_config["window_title"]
@@ -99,6 +127,9 @@ def main() -> int:
         print("[JFO Hand Tracking] Webcam iniciada.")
         print(f"[JFO Hand Tracking] Mão configurada: {tracking_config['target_hand']}.")
         print("[JFO Hand Tracking] Fase 4: gesto -> TCP (START/STOP/HEARTBEAT) -> adaptador -> jogo.")
+        print(f"[JFO Hand Tracking] Empurrão ({PUSH_ABILITY}): palma aberta + avanço.")
+        if slow is not None:
+            print(f"[JFO Hand Tracking] Lentidão ({SLOW_ABILITY}): pinça com polegar e indicador.")
         print(r"[JFO Hand Tracking] Inicie primeiro: .venv\Scripts\python.exe -m adapter.server")
         print(f"[JFO Hand Tracking] Pressione '{exit_key}' para sair.")
 
@@ -119,7 +150,10 @@ def main() -> int:
             detections, _ = detector.process(processing_frame)
             visualizer.draw(frame, detections)
             detection = detections[0] if detections else None
-            result = recognizer.update(detection)
+
+            result = push.update(detection)
+            # Uma mão, um gesto por vez: a pinça espera o empurrão terminar.
+            slow_result = slow.update(detection, suppressed=push.holding) if slow is not None else None
 
             now = time.perf_counter()
             delta = now - previous_time
@@ -128,31 +162,27 @@ def main() -> int:
                 instantaneous_fps = 1.0 / delta
                 fps = instantaneous_fps if fps == 0 else (0.9 * fps + 0.1 * instantaneous_fps)
 
-            if result.state in ("GESTURE_DETECTED", "HOLDING"):
-                state_color = GREEN
-            elif result.state == "ARMED":
-                state_color = YELLOW
-            elif result.state in ("HAND_LOST", "IDLE"):
-                state_color = ORANGE
-            else:
-                state_color = GRAY
-
             adapter_text, adapter_color = adapter_line(sender.last_result)
+            push_color = state_color(result.state)
             lines = [
-                (f"STATE: {result.state}", state_color),
-                (f"GESTURE: {result.message}", state_color),
+                (f"STATE: {result.state}", push_color),
+                (f"GESTURE: {result.message}", push_color),
                 (f"OPEN PALM: {'YES' if result.open_palm else 'NO'}", GRAY),
                 (f"PALM SCALE: {result.scale_ratio:.2f}x  |  Z DELTA: {result.z_delta:+.3f}", GRAY),
-                (adapter_text, adapter_color),
             ]
+            if slow_result is not None:
+                slow_color = state_color(slow_result.state)
+                ratio = "--" if slow_result.pinch_ratio is None else f"{slow_result.pinch_ratio:.2f}"
+                lines.append((f"SLOW: {slow_result.state}  |  PINCH: {ratio}", slow_color))
+                lines.append((f"SLOW: {slow_result.message}", slow_color))
+            lines.append((adapter_text, adapter_color))
             if tracking_config["show_fps"]:
                 lines.append((f"FPS: {fps:.1f}", (255, 255, 255)))
             draw_panel(frame, lines)
 
-            if result.triggered and not sender.start_ability(ABILITY):
-                print("[AVISO] Fila de envio cheia; START descartado.")
-            if result.hold_released and not sender.stop_ability(ABILITY):
-                print("[AVISO] Fila de envio cheia; STOP não enviado (o adaptador solta a tecla sozinho).")
+            dispatch(sender, PUSH_ABILITY, result)
+            if slow_result is not None:
+                dispatch(sender, SLOW_ABILITY, slow_result)
 
             cv2.imshow(window_title, frame)
             key = cv2.waitKey(1) & 0xFF
@@ -165,8 +195,11 @@ def main() -> int:
         print(f"[ERRO] {error}")
         return 1
     finally:
-        if recognizer.holding:
-            sender.stop_ability(ABILITY)  # nunca sai deixando a tecla pressionada
+        # Nunca sai deixando uma tecla pressionada.
+        if push.holding:
+            sender.stop_ability(PUSH_ABILITY)
+        if slow is not None and slow.holding:
+            sender.stop_ability(SLOW_ABILITY)
         sender.close()
         camera.close()
         detector.close()

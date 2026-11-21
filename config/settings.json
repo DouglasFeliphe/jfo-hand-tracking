@@ -27,7 +27,8 @@
     "hold_enabled": true,
     "hold_release_ratio": 1.04,
     "hold_release_seconds": 0.15,
-    "hold_lost_grace_seconds": 0.15
+    "hold_lost_grace_seconds": 0.15,
+    "pinch_exclusion_ratio": 0.4
   },
   "display": {
     "window_title": "JFO Hand Tracking - Phase 4",
@@ -52,7 +53,23 @@
         "keys": ["2"],
         "hold_ms": 80,
         "allow_hold": true
+      },
+      "FORCE_SLOW": {
+        "keys": ["1"],
+        "hold_ms": 80,
+        "allow_hold": true
       }
     }
+  },
+  "slow_gesture": {
+    "enabled": true,
+    "pinch_close_ratio": 0.35,
+    "pinch_open_ratio": 0.4,
+    "finger_extended_angle": 150.0,
+    "stability_seconds": 0.2,
+    "cooldown_seconds": 0.4,
+    "hold_enabled": true,
+    "hold_release_seconds": 0.15,
+    "hold_lost_grace_seconds": 0.15
   }
 }

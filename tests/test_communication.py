@@ -88,6 +88,7 @@ def test_start_stop_roundtrip_and_duplicate_protection() -> None:
         assert start.ok and start.delivered
         assert start.status == "injected"
         assert start.kind == "START"
+        assert start.ability == "FORCE_PUSH"
         assert start.sequence == 1
 
         replay = {"type": "ABILITY_START", "ability": "FORCE_PUSH", "hand": "RIGHT",
@@ -155,6 +156,18 @@ def test_invalid_fields_are_rejected() -> None:
     assert state.process({**base, "sequence": 0})[0] == "rejected"
     assert state.process({**base, "sequence": True})[0] == "rejected"
     assert state.process({**base, "session_id": ""})[0] == "rejected"
+
+
+def test_slow_ability_roundtrip_through_client() -> None:
+    backend = FakeBackend()
+    state = AdapterState(backend, supported_abilities={"FORCE_PUSH", "FORCE_SLOW"})
+    with running_server(state) as (host, port):
+        client = GameAdapterClient(host=host, port=port)
+        start = client.send_start("FORCE_SLOW")
+        assert start.ok and start.ability == "FORCE_SLOW"
+        assert client.send_heartbeat("FORCE_SLOW").status == "held"
+        assert client.send_stop("FORCE_SLOW").status == "released"
+        assert backend.calls[0] == ("press", "FORCE_SLOW")
 
 
 def test_new_ability_is_accepted_only_when_configured() -> None:

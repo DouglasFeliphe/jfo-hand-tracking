@@ -164,3 +164,18 @@ def test_dry_run_mimics_statuses() -> None:
     assert backend.heartbeat("FORCE_PUSH")[0] == "held"
     assert backend.release("FORCE_PUSH")[0] == "released"
     assert backend.release("FORCE_PUSH")[0] == "not_active"
+
+
+def test_push_and_slow_keys_are_independent() -> None:
+    bindings = {
+        "FORCE_PUSH": {"keys": ["2"], "hold_ms": 80, "allow_hold": True},
+        "FORCE_SLOW": {"keys": ["1"], "hold_ms": 80, "allow_hold": True},
+    }
+    backend = FakeKeyboard(bindings)
+    assert SCANCODES["1"] == 0x02
+    backend.press("FORCE_SLOW")
+    backend.advance(0.2)
+    backend.release("FORCE_SLOW")
+    assert backend.events == [("1", "down"), ("1", "up")]
+    backend.press("FORCE_PUSH")
+    assert backend.events[-1] == ("2", "down")

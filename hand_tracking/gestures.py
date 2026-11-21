@@ -86,6 +86,7 @@ class GestureRecognizer:
         hold_release_ratio: float = 1.04,
         hold_release_seconds: float = 0.15,
         hold_lost_grace_seconds: float = 0.15,
+        pinch_exclusion_ratio: float = 0.40,
     ) -> None:
         self.open_palm_angle = open_palm_angle
         self.thumb_spread_ratio = thumb_spread_ratio
@@ -98,6 +99,9 @@ class GestureRecognizer:
         self.hold_release_ratio = hold_release_ratio
         self.hold_release_seconds = hold_release_seconds
         self.hold_lost_grace_seconds = hold_lost_grace_seconds
+        # Polegar a menos que isso (em larguras de palma) da ponta do indicador = pinça,
+        # nunca palma aberta. Mantém o empurrão e a lentidão (pinça) mutuamente exclusivos.
+        self.pinch_exclusion_ratio = pinch_exclusion_ratio
         self._scale_history: deque[float] = deque(maxlen=max(1, smoothing_samples))
         self._z_history: deque[float] = deque(maxlen=max(1, smoothing_samples))
         self.reset()
@@ -131,7 +135,12 @@ class GestureRecognizer:
         palm_width = _distance(_xy(landmarks, 5), _xy(landmarks, 17))
         thumb_spread = _distance(_xy(landmarks, 4), _xy(landmarks, 5))
         thumb_ratio = thumb_spread / max(palm_width, 1e-6)
-        open_palm = extended == 4 and thumb_ratio >= self.thumb_spread_ratio
+        thumb_index_ratio = _distance(_xy(landmarks, 4), _xy(landmarks, 8)) / max(palm_width, 1e-6)
+        open_palm = (
+            extended == 4
+            and thumb_ratio >= self.thumb_spread_ratio
+            and thumb_index_ratio > self.pinch_exclusion_ratio
+        )
 
         # Palm scale is less sensitive to finger articulation than the full bbox.
         wrist = _xy(landmarks, 0)
