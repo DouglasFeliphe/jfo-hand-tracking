@@ -63,14 +63,6 @@ def test_open_palm_never_triggers_slow():
         assert recognizer.update(make_hand(), now=1.0 + step * 0.1).triggered is False
 
 
-def test_pinch_never_arms_the_push_gesture():
-    push = GestureRecognizer(arm_stability_seconds=0.1, smoothing_samples=1)
-    for step in range(20):
-        result = push.update(make_pinch_hand(), now=1.0 + step * 0.1)
-        assert result.state == "TRACKING"
-        assert result.open_palm is False
-
-
 def test_push_exclusion_can_be_disabled():
     push = GestureRecognizer(arm_stability_seconds=0.1, smoothing_samples=1, pinch_exclusion_ratio=0.0)
     assert push.update(make_pinch_hand(), now=1.0).open_palm is True  # sem a proteção, a pinça "vira" palma

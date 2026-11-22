@@ -7,7 +7,10 @@ class Camera:
     """Small OpenCV webcam wrapper with optional mirrored preview/input."""
 
     def __init__(self, index: int = 0, width: int = 1280, height: int = 720,
-                 fps: int = 30, mirror: bool = True) -> None:
+                 fps: int = 30, mirror: bool = True, fourcc: str | None = None,
+                 buffer_size: int = 1) -> None:
+        self.fourcc = fourcc
+        self.buffer_size = buffer_size
         self.index = index
         self.width = width
         self.height = height
@@ -28,6 +31,12 @@ class Camera:
                 "Verifique se ela está conectada e se outro programa não está usando-a."
             )
 
+        # Formato de captura (ex.: "MJPG"): muitas webcams USB só chegam a 30 FPS em 720p assim.
+        # Precisa ser definido antes da resolução para ter efeito em vários drivers.
+        if self.fourcc:
+            capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
+        # Fila de quadros mínima: evita processar imagens atrasadas (ignorado por alguns drivers).
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, self.buffer_size)
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         capture.set(cv2.CAP_PROP_FPS, self.fps)

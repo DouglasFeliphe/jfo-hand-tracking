@@ -17,6 +17,7 @@ class GestureResult:
     finger_angles: dict[str, float]
     message: str
     hold_released: bool = False  # True uma única vez: o "segurar" terminou (soltar a tecla)
+    anisotropy: float = 1.0      # >1: a palma cresceu mais em uma direção (rotação), não em profundidade
 
 
 def _xy(landmarks: Any, index: int) -> tuple[float, float]:
@@ -48,6 +49,13 @@ class GestureRecognizer:
     MediaPipe's normalized z is used as supporting evidence; apparent palm
     growth is the primary depth cue because monocular z can be noisy.
 
+    The thrust is detected as *recent* palm growth: the current palm scale is
+    compared with the scale `push_window_seconds` ago, not with a fixed
+    baseline. A slow lean toward the camera therefore never counts, only a
+    quick push. The growth must also be isotropic (palm length and width grow
+    together, within `anisotropy_tolerance` of the growth itself): turning the
+    hand changes only one of them.
+
     After the thrust (`triggered=True`, press the key) the recognizer enters
     HOLDING while the palm stays open and extended. When the pose ends
     (palm closes, hand retracts or is lost) it reports `hold_released=True`
@@ -61,7 +69,7 @@ class GestureRecognizer:
         "ARMED": "ARMED - PUSH FORWARD",
         "GESTURE_DETECTED": "FORCE PUSH DETECTED",
         "HOLDING": "HOLDING - CLOSE HAND OR PULL BACK TO RELEASE",
-        "COOLDOWN": "RELEASE HAND TO REARM",
+        "COOLDOWN": "PULL BACK OR CLOSE HAND TO REARM",
         "HAND_LOST": "SHOW RIGHT HAND",
     }
 
@@ -76,17 +84,26 @@ class GestureRecognizer:
         self,
         open_palm_angle: float = 150.0,
         thumb_spread_ratio: float = 0.42,
-        arm_stability_seconds: float = 0.35,
-        scale_trigger_ratio: float = 1.15,
-        scale_strong_ratio: float = 1.25,
-        z_trigger_delta: float = 0.006,
-        cooldown_seconds: float = 0.80,
-        smoothing_samples: int = 5,
+        arm_stability_seconds: float = 0.20,
+        scale_trigger_ratio: float = 1.07,
+        scale_strong_ratio: float = 1.15,
+        z_trigger_delta: float = 0.004,
+        cooldown_seconds: float = 0.50,
+        smoothing_samples: int = 3,
         hold_enabled: bool = True,
         hold_release_ratio: float = 1.04,
         hold_release_seconds: float = 0.15,
         hold_lost_grace_seconds: float = 0.15,
-        pinch_exclusion_ratio: float = 0.40,
+        pinch_exclusion_ratio: float = 0.0,
+        push_window_seconds: float = 0.30,
+        anisotropy_tolerance: float = 1.0,
+        rearm_on_retract: bool = True,
+        adaptive_threshold: bool = True,
+        noise_k: float = 4.0,
+        min_scale_trigger: float = 1.06,
+        max_scale_trigger: float = 1.12,
+        noise_window_frames: int = 90,
+        noise_min_samples: int = 20,
     ) -> None:
         self.open_palm_angle = open_palm_angle
         self.thumb_spread_ratio = thumb_spread_ratio
@@ -95,15 +112,32 @@ class GestureRecognizer:
         self.scale_strong_ratio = scale_strong_ratio
         self.z_trigger_delta = z_trigger_delta
         self.cooldown_seconds = cooldown_seconds
+        self.push_window_seconds = push_window_seconds
+        self.anisotropy_tolerance = anisotropy_tolerance
+        self.rearm_on_retract = rearm_on_retract
+        # Limiar adaptativo: estima o ruído de rastreamento da escala (MAD das variações entre
+        # quadros, insensível ao próprio empurrão) e põe o limiar `noise_k` desvios acima.
+        # Rastreamento limpo => limiar baixo (mais rápido); ruidoso => alto (mais seguro).
+        self.adaptive_threshold = adaptive_threshold
+        self.noise_k = noise_k
+        self.min_scale_trigger = min_scale_trigger
+        self.max_scale_trigger = max_scale_trigger
+        self.noise_min_samples = noise_min_samples
+        self._noise_diffs: deque[float] = deque(maxlen=max(noise_min_samples, int(noise_window_frames)))
+        self._prev_raw_scale: float | None = None
         self.hold_enabled = hold_enabled
         self.hold_release_ratio = hold_release_ratio
         self.hold_release_seconds = hold_release_seconds
         self.hold_lost_grace_seconds = hold_lost_grace_seconds
-        # Polegar a menos que isso (em larguras de palma) da ponta do indicador = pinça,
-        # nunca palma aberta. Mantém o empurrão e a lentidão (pinça) mutuamente exclusivos.
+        # Opcional (0 = desativado): polegar a menos que isso (em larguras de palma) da ponta
+        # do indicador nunca conta como palma aberta. Mantido por compatibilidade com configs antigas.
         self.pinch_exclusion_ratio = pinch_exclusion_ratio
         self._scale_history: deque[float] = deque(maxlen=max(1, smoothing_samples))
         self._z_history: deque[float] = deque(maxlen=max(1, smoothing_samples))
+        self._length_history: deque[float] = deque(maxlen=max(1, smoothing_samples))
+        self._width_history: deque[float] = deque(maxlen=max(1, smoothing_samples))
+        # (tempo, escala, z, comprimento, largura) já suavizados, dentro da janela do empurrão
+        self._samples: deque[tuple[float, float, float, float, float]] = deque()
         self.reset()
 
     def reset(self) -> None:
@@ -115,15 +149,23 @@ class GestureRecognizer:
         self._closed_since: float | None = None
         self._below_since: float | None = None
         self._lost_since: float | None = None
+        self._clear_history()
+
+    def _clear_history(self) -> None:
         self._scale_history.clear()
         self._z_history.clear()
+        self._length_history.clear()
+        self._width_history.clear()
+        self._samples.clear()
+        self._noise_diffs.clear()
+        self._prev_raw_scale = None
 
     @property
     def holding(self) -> bool:
         """True while the key should be pressed (from the thrust until hold_released)."""
         return self.state in ("GESTURE_DETECTED", "HOLDING")
 
-    def _measure(self, landmarks: Any) -> tuple[bool, dict[str, float], float, float]:
+    def _measure(self, landmarks: Any) -> tuple[bool, dict[str, float], float, float, float, float]:
         angles: dict[str, float] = {}
         extended = 0
         for name, (mcp, pip, tip) in self.FINGER_JOINTS.items():
@@ -142,15 +184,20 @@ class GestureRecognizer:
             and thumb_index_ratio > self.pinch_exclusion_ratio
         )
 
-        # Palm scale is less sensitive to finger articulation than the full bbox.
+        # Palm size from several palm distances (landmark jitter averages out instead of
+        # dominating a single measurement). Fingers are excluded: they articulate.
+        # length: wrist -> the four MCP joints; width: lateral spans across the knuckles.
         wrist = _xy(landmarks, 0)
-        middle_mcp = _xy(landmarks, 9)
-        palm_length = _distance(wrist, middle_mcp)
-        scale = (palm_length + palm_width) / 2.0
+        length_points = [_xy(landmarks, index) for index in (5, 9, 13, 17)]
+        palm_length = sum(_distance(wrist, point) for point in length_points) / len(length_points)
+        knuckles = {index: _xy(landmarks, index) for index in (5, 9, 13, 17)}
+        width_pairs = ((5, 17), (5, 13), (9, 17), (5, 9), (9, 13), (13, 17))
+        palm_span = sum(_distance(knuckles[a], knuckles[b]) for a, b in width_pairs) / len(width_pairs)
+        scale = (palm_length + palm_span) / 2.0
 
         z_values = [float(landmarks.landmark[i].z) for i in (0, 5, 9, 17)]
         mean_z = sum(z_values) / len(z_values)
-        return open_palm, angles, scale, mean_z
+        return open_palm, angles, scale, mean_z, palm_length, palm_span
 
     @staticmethod
     def _median(values: deque[float]) -> float:
@@ -159,6 +206,27 @@ class GestureRecognizer:
         if len(ordered) % 2:
             return ordered[middle]
         return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+    def noise_sigma(self) -> float | None:
+        """Ruído relativo do tamanho da palma por quadro (None até haver amostras suficientes)."""
+        if len(self._noise_diffs) < self.noise_min_samples:
+            return None
+        ordered = sorted(self._noise_diffs)
+        center = ordered[len(ordered) // 2]
+        deviations = sorted(abs(value - center) for value in ordered)
+        mad = deviations[len(deviations) // 2]
+        # MAD -> desvio padrão (1,4826); a diferença de dois quadros tem variância 2x.
+        return 1.4826 * mad / math.sqrt(2.0)
+
+    def trigger_ratio(self) -> float:
+        """Limiar de crescimento em vigor: adaptativo ao ruído, ou o fixo como reserva."""
+        if not self.adaptive_threshold:
+            return self.scale_trigger_ratio
+        sigma = self.noise_sigma()
+        if sigma is None:
+            return self.scale_trigger_ratio
+        ratio = 1.0 + self.noise_k * sigma
+        return max(self.min_scale_trigger, min(self.max_scale_trigger, ratio))
 
     def update(self, detection: Any | None, now: float | None = None) -> GestureResult:
         now = time.perf_counter() if now is None else now
@@ -178,17 +246,40 @@ class GestureRecognizer:
             self._closed_since = None
             self._below_since = None
             self._lost_since = None
-            self._scale_history.clear()
-            self._z_history.clear()
+            self._clear_history()
             return GestureResult(self.state, False, False, 1.0, 0.0, {}, "SHOW RIGHT HAND",
                                  hold_released=was_holding)
 
         self._lost_since = None
-        open_palm, angles, raw_scale, raw_z = self._measure(detection.landmarks)
+        open_palm, angles, raw_scale, raw_z, raw_length, raw_width = self._measure(detection.landmarks)
+        if self._prev_raw_scale is not None and self._prev_raw_scale > 1e-6:
+            self._noise_diffs.append(raw_scale / self._prev_raw_scale - 1.0)
+        self._prev_raw_scale = raw_scale
         self._scale_history.append(raw_scale)
         self._z_history.append(raw_z)
+        self._length_history.append(raw_length)
+        self._width_history.append(raw_width)
         scale = self._median(self._scale_history)
         z_value = self._median(self._z_history)
+        length = self._median(self._length_history)
+        width = self._median(self._width_history)
+
+        # Crescimento recente (janela deslizante) e sua isotropia.
+        self._samples.append((now, scale, z_value, length, width))
+        while len(self._samples) > 1 and now - self._samples[0][0] > self.push_window_seconds:
+            self._samples.popleft()
+        # Referência = média do terço mais antigo da janela (menos ruído que uma única amostra).
+        oldest = list(self._samples)[: max(1, len(self._samples) // 3)]
+        ref_scale = sum(item[1] for item in oldest) / len(oldest)
+        ref_z = sum(item[2] for item in oldest) / len(oldest)
+        ref_length = sum(item[3] for item in oldest) / len(oldest)
+        ref_width = sum(item[4] for item in oldest) / len(oldest)
+        window_growth = scale / max(ref_scale, 1e-6)
+        window_z = z_value - ref_z
+        length_growth = length / max(ref_length, 1e-6)
+        width_growth = width / max(ref_width, 1e-6)
+        anisotropy = max(length_growth, width_growth) / max(min(length_growth, width_growth), 1e-6)
+
         scale_ratio = scale / self._baseline_scale if self._baseline_scale else 1.0
         z_delta = z_value - self._baseline_z if self._baseline_z is not None else 0.0
         triggered = False
@@ -220,12 +311,21 @@ class GestureRecognizer:
                 scale_ratio = 1.0
                 z_delta = 0.0
             else:
-                scale_ratio = scale / max(self._baseline_scale or scale, 1e-6)
-                z_delta = z_value - (self._baseline_z if self._baseline_z is not None else z_value)
-                depth_supported = z_delta <= -self.z_trigger_delta
-                if scale_ratio >= self.scale_trigger_ratio and (depth_supported or scale_ratio >= self.scale_strong_ratio):
+                scale_ratio = window_growth
+                z_delta = window_z
+                depth_supported = window_z <= -self.z_trigger_delta
+                # O desbalanço comprimento/largura precisa ser pequeno frente ao crescimento:
+                # empurrar cresce os dois igualmente; girar a mão muda quase só a largura.
+                isotropic = (anisotropy - 1.0) <= self.anisotropy_tolerance * max(window_growth - 1.0, 0.0)
+                trigger_ratio = self.trigger_ratio()
+                strong_ratio = trigger_ratio + (self.scale_strong_ratio - self.scale_trigger_ratio)
+                if (window_growth >= trigger_ratio and isotropic
+                        and (depth_supported or window_growth >= strong_ratio)):
                     self.state = "GESTURE_DETECTED"
                     self._trigger_time = now
+                    # A referência do "segurar" é a escala de antes do empurrão.
+                    self._baseline_scale = ref_scale
+                    self._baseline_z = ref_z
                     triggered = True
 
         elif self.state == "GESTURE_DETECTED":
@@ -253,7 +353,15 @@ class GestureRecognizer:
         elif self.state == "COOLDOWN":
             elapsed = now - (self._trigger_time if self._trigger_time is not None else now)
             if elapsed >= self.cooldown_seconds:
-                if not open_palm:
+                if open_palm:
+                    self._closed_since = None
+                    # Mão aberta e sem avançar (recuou ou parou): já pode rearmar.
+                    if self.rearm_on_retract and window_growth < 1.02:
+                        self.state = "TRACKING"
+                        self._open_since = None
+                        self._baseline_scale = None
+                        self._baseline_z = None
+                else:
                     if self._closed_since is None:
                         self._closed_since = now
                     elif now - self._closed_since >= 0.20:
@@ -262,8 +370,7 @@ class GestureRecognizer:
                         self._baseline_scale = None
                         self._baseline_z = None
                         self._closed_since = None
-                else:
-                    self._closed_since = None
 
         return GestureResult(self.state, open_palm, triggered, scale_ratio, z_delta, angles,
-                             self.MESSAGES.get(self.state, self.state), hold_released=hold_released)
+                             self.MESSAGES.get(self.state, self.state), hold_released=hold_released,
+                             anisotropy=anisotropy)

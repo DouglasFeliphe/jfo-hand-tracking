@@ -31,17 +31,17 @@ class AsyncSender:
         self._heartbeat_interval = heartbeat_interval
         self._queue: queue.Queue[object] = queue.Queue(maxsize=maxsize)
         self._thread = threading.Thread(target=self._run, name="adapter-sender", daemon=True)
-        self._active: set[str] = set()  # acessado apenas pela thread de envio
+        self._active: dict[str, str] = {}  # habilidade -> mão; acessado apenas pela thread de envio
         self.last_result: SendResult | None = None
 
     def start(self) -> None:
         self._thread.start()
 
-    def start_ability(self, ability: str) -> bool:
-        return self._enqueue(("START", ability), timeout=0.0)
+    def start_ability(self, ability: str, hand: str = "RIGHT") -> bool:
+        return self._enqueue(("START", ability, hand), timeout=0.0)
 
-    def stop_ability(self, ability: str) -> bool:
-        return self._enqueue(("STOP", ability), timeout=0.2)
+    def stop_ability(self, ability: str, hand: str = "RIGHT") -> bool:
+        return self._enqueue(("STOP", ability, hand), timeout=0.2)
 
     def close(self, timeout: float = 3.0) -> None:
         try:
@@ -51,7 +51,7 @@ class AsyncSender:
         if self._thread.is_alive():
             self._thread.join(timeout=timeout)
 
-    def _enqueue(self, item: tuple[str, str], timeout: float) -> bool:
+    def _enqueue(self, item: tuple[str, str, str], timeout: float) -> bool:
         try:
             if timeout > 0:
                 self._queue.put(item, timeout=timeout)
@@ -75,26 +75,26 @@ class AsyncSender:
                 continue
             if item is _STOP_THREAD:
                 break
-            kind, ability = item  # type: ignore[misc]
+            kind, ability, hand = item  # type: ignore[misc]
             if kind == "START":
-                result = self._client.send_start(ability)
+                result = self._client.send_start(ability, hand)
                 if result.ok:
-                    self._active.add(ability)
+                    self._active[ability] = hand
                 self._report(result)
             else:
-                self._active.discard(ability)  # antes de enviar: nenhum heartbeat depois do STOP
-                result = self._client.send_stop(ability)
+                self._active.pop(ability, None)  # antes de enviar: nenhum heartbeat depois do STOP
+                result = self._client.send_stop(ability, hand)
                 for _ in range(STOP_ATTEMPTS - 1):
                     if result.delivered:
                         break
-                    result = self._client.send_stop(ability)
+                    result = self._client.send_stop(ability, hand)
                 self._report(result)
 
     def _send_heartbeats(self) -> None:
-        for ability in list(self._active):
-            result = self._client.send_heartbeat(ability)
+        for ability, hand in list(self._active.items()):
+            result = self._client.send_heartbeat(ability, hand)
             if result.status == "held":
                 continue
             # A tecla foi solta pelo adaptador (ou ele ficou indisponível): para de enviar.
-            self._active.discard(ability)
+            self._active.pop(ability, None)
             self._report(result)

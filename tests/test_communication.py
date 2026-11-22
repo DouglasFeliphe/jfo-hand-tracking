@@ -163,10 +163,10 @@ def test_slow_ability_roundtrip_through_client() -> None:
     state = AdapterState(backend, supported_abilities={"FORCE_PUSH", "FORCE_SLOW"})
     with running_server(state) as (host, port):
         client = GameAdapterClient(host=host, port=port)
-        start = client.send_start("FORCE_SLOW")
+        start = client.send_start("FORCE_SLOW", "LEFT")
         assert start.ok and start.ability == "FORCE_SLOW"
-        assert client.send_heartbeat("FORCE_SLOW").status == "held"
-        assert client.send_stop("FORCE_SLOW").status == "released"
+        assert client.send_heartbeat("FORCE_SLOW", "LEFT").status == "held"
+        assert client.send_stop("FORCE_SLOW", "LEFT").status == "released"
         assert backend.calls[0] == ("press", "FORCE_SLOW")
 
 
@@ -248,3 +248,41 @@ def test_async_sender_retries_stop_when_adapter_is_unreachable() -> None:
         assert sender.last_result.status == "unavailable"
     finally:
         sender.close()
+
+
+def test_async_sender_forwards_the_hand_for_each_ability() -> None:
+    from communication.client import SendResult
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str]] = []
+
+        def _result(self, kind: str, status: str, ability: str) -> SendResult:
+            return SendResult(True, status, "", len(self.calls), True, kind, ability)
+
+        def send_start(self, ability: str, hand: str = "RIGHT") -> SendResult:
+            self.calls.append(("START", ability, hand))
+            return self._result("START", "injected", ability)
+
+        def send_stop(self, ability: str, hand: str = "RIGHT") -> SendResult:
+            self.calls.append(("STOP", ability, hand))
+            return self._result("STOP", "released", ability)
+
+        def send_heartbeat(self, ability: str, hand: str = "RIGHT") -> SendResult:
+            self.calls.append(("HEARTBEAT", ability, hand))
+            return self._result("HEARTBEAT", "held", ability)
+
+    client = RecordingClient()
+    sender = AsyncSender(client, heartbeat_interval=0.03)  # type: ignore[arg-type]
+    sender.start()
+    try:
+        sender.start_ability("FORCE_PUSH", "RIGHT")
+        sender.start_ability("FORCE_SLOW", "LEFT")
+        assert wait_until(lambda: ("HEARTBEAT", "FORCE_SLOW", "LEFT") in client.calls
+                          and ("HEARTBEAT", "FORCE_PUSH", "RIGHT") in client.calls)
+        sender.stop_ability("FORCE_SLOW", "LEFT")
+        assert wait_until(lambda: ("STOP", "FORCE_SLOW", "LEFT") in client.calls)
+    finally:
+        sender.close()
+    assert ("START", "FORCE_PUSH", "RIGHT") in client.calls
+    assert ("START", "FORCE_SLOW", "LEFT") in client.calls

@@ -1,15 +1,13 @@
 # JFO Hand Tracking — Phase 4
 
-Reconhece gestos da mão direita e os transmite por TCP (`127.0.0.1:8765`) a um adaptador, que pressiona a tecla da habilidade no Jedi: Fallen Order. Enquanto o gesto é mantido, a tecla **continua pressionada**; ao terminá-lo, ela é solta.
+Reconhece gestos das duas mãos e os transmite por TCP (`127.0.0.1:8765`) a um adaptador, que pressiona a tecla da habilidade no Jedi: Fallen Order. Enquanto o gesto é mantido, a tecla **continua pressionada**; ao terminá-lo, ela é solta.
 
-| Habilidade              | Gesto                                                                                     | Tecla |
-| ----------------------- | ----------------------------------------------------------------------------------------- | ----- |
-| Empurrão (`FORCE_PUSH`) | Palma aberta parada e depois um avanço da mão para a câmera                               | `2`   |
-| Lentidão (`FORCE_SLOW`) | Pinça (sinal de "OK"): polegar tocando o indicador, com médio, anelar e mínimo estendidos | `1`   |
+| Habilidade              | Mão      | Gesto                                                                                                                            | Tecla |
+| ----------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- | ----- |
+| Empurrão (`FORCE_PUSH`) | Direita  | Palma aberta parada e depois um avanço da mão para a câmera. Mantenha a mão estendida para segurar.                              | `2`   |
+| Lentidão (`FORCE_SLOW`) | Esquerda | Varrida horizontal para a sua direita com a palma aberta ("abrir uma cortina"). A tecla fica pressionada só durante o movimento. | `1`   |
 
-Uma mão, um gesto por vez: enquanto o empurrão está sendo segurado, a pinça é ignorada.
-
-> **Importante:** no modo `keyboard` o adaptador envia teclas reais ao Windows, somente com a janela em primeiro plano contendo `game.window_title_contains`. Comece sempre no modo `dry_run`.
+Cada mão tem o seu gesto, então os dois podem acontecer ao mesmo tempo.
 
 ## Requisitos
 
@@ -50,27 +48,48 @@ fechar a mão / recuar / perder a mão ──► STOP (tecla sobe)
 
 ## Configuração (`config/settings.json`)
 
-### `gestures` (segurar)
+### `gestures` (empurrão)
 
-| Campo                     | Descrição                                                                                                                                                                                                       |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hold_enabled`            | `false` desativa o segurar: a tecla é solta no quadro seguinte (toque).                                                                                                                                         |
-| `hold_release_ratio`      | Escala da palma (relativa ao armamento) abaixo da qual a mão é considerada recuada. Padrão 1,04.                                                                                                                |
-| `hold_release_seconds`    | Tempo que o fim da pose precisa durar para soltar (evita soltar por um quadro ruim).                                                                                                                            |
-| `hold_lost_grace_seconds` | Tolerância a perda de rastreamento antes de soltar.                                                                                                                                                             |
-| `pinch_exclusion_ratio`   | Polegar mais perto que isso (em larguras de palma) da ponta do indicador nunca conta como palma aberta. Mantém empurrão e pinça mutuamente exclusivos. Mantenha ≥ `pinch_open_ratio` da lentidão. `0` desativa. |
+| Campo                                   | Descrição                                                                                                                                                                                                                                             |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `open_palm_angle`, `thumb_spread_ratio` | O que conta como palma aberta (dedos estendidos e polegar afastado).                                                                                                                                                                                  |
+| `arm_stability_seconds`                 | Tempo de palma aberta parada antes de armar. Padrão 0,20.                                                                                                                                                                                             |
+| `smoothing_samples`                     | Mediana sobre N quadros (mais = mais estável, mais atraso). Padrão 3.                                                                                                                                                                                 |
+| `push_window_seconds`                   | O empurrão é o crescimento da palma **nesta janela** (padrão 0,30 s). Empurrões mais lentos que isso não disparam; é o que impede que inclinar o corpo devagar dispare. Aumente para aceitar empurrões mais lentos, ao custo de mais falsos disparos. |
+| `scale_trigger_ratio`                   | Limiar de crescimento **de reserva**, usado nos primeiros ~0,7 s, até haver amostras para estimar o ruído (ou sempre, com `adaptive_threshold: false`).                                                                                               |
+| `scale_strong_ratio`                    | Crescimento forte o bastante para disparar sem apoio do `z`. Mantém a mesma diferença para o limiar em vigor.                                                                                                                                         |
+| `z_trigger_delta`                       | Queda mínima do `z` do MediaPipe (apoio) na janela.                                                                                                                                                                                                   |
+| `anisotropy_tolerance`                  | O desbalanço entre comprimento e largura da palma precisa ser no máximo esta vez o crescimento. Empurrar cresce os dois igualmente; **girar a mão** muda quase só a largura e é rejeitado. `0` exige crescimento perfeitamente uniforme.              |
+| `adaptive_threshold`                    | Liga o limiar adaptativo (abaixo).                                                                                                                                                                                                                    |
+| `noise_k`                               | Quantos desvios de ruído acima de 1,0 fica o limiar. Padrão 4.                                                                                                                                                                                        |
+| `min_scale_trigger`                     | **Piso** do limiar adaptativo (padrão 1,06). Menor = disparo mais rápido e detecta empurrões fracos, mas mais sensível a pequenas oscilações de profundidade.                                                                                         |
+| `max_scale_trigger`                     | **Teto** do limiar adaptativo (padrão 1,12). Com tracking muito ruidoso, o empurrão precisa ser mais forte que isso.                                                                                                                                  |
+| `cooldown_seconds`                      | Espera mínima depois do disparo antes de poder rearmar. Padrão 0,50.                                                                                                                                                                                  |
+| `rearm_on_retract`                      | `true`: depois de recuar a mão aberta, já rearma sem fechar o punho.                                                                                                                                                                                  |
+| `hold_enabled`                          | `false` desativa o segurar: a tecla é solta no quadro seguinte (toque).                                                                                                                                                                               |
+| `hold_release_ratio`                    | Escala da palma (relativa à escala **de antes do empurrão**) abaixo da qual a mão é considerada recuada. Padrão 1,04.                                                                                                                                 |
+| `hold_release_seconds`                  | Tempo que o fim da pose precisa durar para soltar (evita soltar por um quadro ruim).                                                                                                                                                                  |
+| `hold_lost_grace_seconds`               | Tolerância a perda de rastreamento antes de soltar.                                                                                                                                                                                                   |
 
-### `slow_gesture` (lentidão, pinça)
+### `slow_gesture` (lentidão, varrida)
 
-| Campo                                                             | Descrição                                                                                                           |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `enabled`                                                         | `false` desativa o gesto de lentidão.                                                                               |
-| `pinch_close_ratio`                                               | Distância polegar–indicador (em larguras de palma) abaixo da qual a pinça começa. Padrão 0,28.                      |
-| `pinch_open_ratio`                                                | Distância acima da qual a pinça é considerada desfeita (histerese). Padrão 0,40.                                    |
-| `finger_extended_angle`                                           | Ângulo mínimo para médio, anelar e mínimo contarem como estendidos. Para manter a pinça, tolera 10° a menos.        |
-| `stability_seconds`                                               | Tempo que a pinça precisa ficar estável para disparar (menor = mais rápido, mais disparos acidentais). Padrão 0,20. |
-| `cooldown_seconds`                                                | Espera mínima antes de poder disparar de novo; a pinça também precisa ser desfeita.                                 |
-| `hold_enabled`, `hold_release_seconds`, `hold_lost_grace_seconds` | Iguais aos do empurrão.                                                                                             |
+| Campo                       | Descrição                                                                                                                  |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                   | `false` desativa o gesto de lentidão. Com ele ativo, o programa usa `max_hands >= 2`.                                      |
+| `hand`                      | Mão que faz a varrida (`Left` ou `Right`).                                                                                 |
+| `direction`                 | `right` ou `left`, relativo a você (com a imagem espelhada, `right` é para a direita da janela).                           |
+| `finger_extended_angle`     | Ângulo mínimo para os 4 dedos contarem como estendidos (palma aberta).                                                     |
+| `start_speed`               | Velocidade mínima para começar, em larguras de palma por segundo (independe da distância da câmera). Padrão 3,0.           |
+| `min_travel`                | Deslocamento mínimo (em larguras de palma) para confirmar a varrida. Padrão 0,6. Menor = dispara mais cedo, mais sensível. |
+| `stop_speed`                | Abaixo desta velocidade a mão é considerada parada (histerese; precisa ser menor que `start_speed`).                       |
+| `stop_seconds`              | Tempo parada antes de soltar a tecla.                                                                                      |
+| `horizontal_dominance`      | O deslocamento horizontal precisa ser pelo menos esta vez o vertical. Evita disparar com movimentos diagonais.             |
+| `velocity_window_seconds`   | Janela usada para medir a velocidade.                                                                                      |
+| `candidate_timeout_seconds` | Tempo máximo para completar `min_travel` depois que a velocidade passa de `start_speed`.                                   |
+| `min_tracking_seconds`      | A mão precisa estar visível por este tempo antes de poder disparar (evita disparar ao entrar na imagem já em movimento).   |
+| `max_hold_seconds`          | Teto de segurança: solta a tecla mesmo se a mão continuar se movendo.                                                      |
+| `cooldown_seconds`          | Espera mínima depois de soltar; a mão também precisa estar quase parada para rearmar.                                      |
+| `hold_lost_grace_seconds`   | Tolerância a perda de rastreamento antes de soltar.                                                                        |
 
 ### `game`
 
@@ -90,21 +109,76 @@ Gere um token: `.\.venv\Scripts\python.exe -c "import secrets; print(secrets.tok
 
 Teclas aceitas em `keys`: `0`–`9`, `Q W E R T F G`, `LSHIFT`, `LCTRL`, `SPACE` (veja `SCANCODES` em `adapter/input_backend.py`). `2` é a tecla da linha numérica do topo, não a do teclado numérico. Duas habilidades não podem compartilhar a mesma tecla.
 
-## Lentidão (pinça)
+## Empurrão: como o disparo funciona (Fase 5)
 
-A lentidão usa a tecla `1`. Segundo a wiki do jogo, um toque ativa a lentidão e segurar dá um efeito maior, então o binding usa `allow_hold: true`: uma pinça curta vira um toque e mantê-la segura a tecla.
+O empurrão é detectado como **crescimento recente** da palma, não como "ficou maior que quando armou":
 
-- **Disparo:** pinça estável por `stability_seconds` (0,2 s) → START.
-- **Manter:** heartbeats enquanto a pinça durar.
-- **Soltar:** pinça desfeita por 0,15 s, dedos dobrados ou mão perdida → STOP.
-- Não usa escala nem profundidade (z), só distâncias e ângulos no plano da imagem.
-- Evite punho fechado para outros gestos: ele é a pose que rearma o empurrão.
+1. **Janela deslizante.** A escala atual é comparada com a de `push_window_seconds` atrás. Um movimento lento (inclinar-se para a câmera) não cresce o bastante dentro da janela; um empurrão rápido, sim.
+2. **Isotropia.** Empurrar faz o comprimento e a largura da palma crescerem juntos. Girar a mão muda quase só um deles e é descartado, mesmo com o `z` ruidoso ajudando.
+3. **Tamanho da palma robusto.** A escala usa 10 distâncias da palma (pulso até os nós dos dedos e entre eles), então o tremor de cada landmark se compensa.
+4. **Limiar adaptativo.** O programa estima o ruído de rastreamento da escala com um estimador robusto (mediana dos desvios, que ignora o próprio empurrão) e põe o limiar `noise_k` desvios acima, entre `min_scale_trigger` e `max_scale_trigger`. Tracking limpo: limiar baixo, disparo mais rápido. Tracking ruidoso: limiar alto, mais seguro.
+5. **Segurar com a referência certa.** A escala de "antes do empurrão" vira a referência para soltar. Antes, ela era a de quando você armou, então quem se inclinou devagar antes de empurrar ficava segurando a tecla.
+6. **Rearme sem fechar o punho.** Recuar a mão aberta e parar já rearma (`rearm_on_retract`).
+
+O painel mostra `PUSH TRIGGER` (limiar em vigor), `NOISE` (ruído estimado) e `ISO` (isotropia), úteis para ajustar.
+
+### Resultados medidos em simulação
+
+Mão sintética a 30 FPS com tremor de 1,5% do tamanho da palma por landmark (`tools/evaluate_push.py` reproduz os números com os seus valores). Antigo = critério da Fase 4 com os valores recomendados na época.
+
+| Situação                                       | Antigo             | Novo     |
+| ---------------------------------------------- | ------------------ | -------- |
+| Inclinar-se devagar (+20% em 2 s) dispara?     | 100% das execuções | 0%       |
+| Girar a mão (largura +30% em 0,4 s) dispara?   | 48%                | 0%       |
+| Girar a mão com `z` ruidoso a favor            | 100%               | 18%      |
+| Mão aberta parada, 60 s                        | 0%                 | 0%       |
+| Oscilar em profundidade ±3% a 1,5 Hz           | 0%                 | **100%** |
+| Atraso, empurrão de +12% em 0,25 s             | 228 ms             | 190 ms   |
+| Atraso, empurrão de +8% em 0,15 s              | 227 ms             | 169 ms   |
+| Atraso, empurrão de +30% em 0,25 s             | 122 ms             | 111 ms   |
+| Detecção, empurrão fraco (+8% em 0,5 s)        | 100%               | 28%      |
+| Tempo entre dois empurrões, sem fechar o punho | não rearma         | 1,20 s   |
+| Tempo entre dois empurrões, fechando o punho   | 1,87 s             | 1,60 s   |
+
+**O que piorou, e por quê:**
+
+- **Oscilar a mão para frente e para trás** (±3% a 1,5 Hz, ou seja, ±1,5 cm a 50 cm da câmera) agora dispara. Isso se parece com empurrões pequenos e repetidos. O piso `min_scale_trigger` controla isso: com 1,07 dispara em 93% das execuções de ±3% e em 3% das de ±2%; com 1,08 cai para 27% e 0%.
+- **Empurrões lentos e fracos** deixam de disparar porque não cabem na janela. É o preço de não disparar ao se inclinar para a câmera. Aumente `push_window_seconds` (0,30 → 0,40) se você empurra devagar.
+- Com tracking **muito** ruidoso (tremor de 3–4% da palma), o limiar sobe até o teto e empurrões de +12% passam a ser detectados só em ~60–70% das tentativas. É o comportamento seguro; melhore a luz ou a câmera, ou aumente `max_scale_trigger` se preferir sensibilidade.
+
+### Ajuste rápido
+
+| Sintoma                           | Ajuste                                                 |
+| --------------------------------- | ------------------------------------------------------ |
+| Dispara sem querer ao mexer a mão | `min_scale_trigger` 1,06 → 1,07 ou 1,08                |
+| Precisa empurrar forte demais     | `min_scale_trigger` 1,06 → 1,05; ou `noise_k` 4 → 3    |
+| Empurrões lentos não disparam     | `push_window_seconds` 0,30 → 0,40                      |
+| Dispara ao girar a mão            | `anisotropy_tolerance` 1,0 → 0,7                       |
+| Atraso geral                      | veja a câmera abaixo; depois `smoothing_samples` 3 → 2 |
+
+### Latência da câmera
+
+Parte do atraso vem da captura, não do reconhecimento. Olhe o `FPS` no painel: abaixo de ~25, a imagem é o gargalo. Em `camera`, você pode adicionar `"fourcc": "MJPG"` (muitas webcams USB só chegam a 30 FPS em 720p com esse formato) ou reduzir `width`/`height` para 640×480. O buffer de captura já usa 1 quadro (`buffer_size`; alguns drivers ignoram). Não consegui medir o efeito sem uma webcam, então valide o FPS no seu equipamento.
+
+## Lentidão (varrida com a mão esquerda)
+
+A lentidão usa a tecla `1`. Segundo a wiki do jogo, um toque ativa a lentidão e segurar dá um efeito maior, então o binding usa `allow_hold: true`.
+
+- **Disparo:** palma aberta e uma varrida rápida para a sua direita (velocidade ≥ `start_speed` e deslocamento ≥ `min_travel`) → START.
+- **Manter:** a tecla fica pressionada enquanto a mão continuar se movendo com a palma aberta.
+- **Soltar:** a mão parar, fechar, voltar para a esquerda ou sair da imagem → STOP.
+- Um gesto muito curto ainda vira um toque, porque a tecla fica pressionada pelo menos `hold_ms`.
+- A velocidade é medida em larguras de palma por segundo, então funciona mais perto ou mais longe da câmera.
+
+Valores medidos em simulação a 30 FPS: o disparo leva de 100 a 300 ms conforme a velocidade da varrida (≈ 200 ms a 5 palmas/s) e a tecla é solta cerca de 230 ms depois que a mão para. Tremor da mão parada não dispara. Acenar de um lado para o outro dispara a cada ida, porque cada ida é uma varrida; a volta para a esquerda é ignorada.
+
+Ajustes comuns: se não disparar, diminua `start_speed` (3,0 → 2,5) ou `min_travel`. Se disparar sem querer, aumente-os. Se a tecla soltar no meio do movimento, diminua `stop_speed` ou aumente `stop_seconds`.
 
 ## Adicionando outras habilidades (puxão...)
 
 1. **Binding:** em `game.bindings`, por exemplo `"FORCE_PULL": { "keys": ["3"], "hold_ms": 80, "allow_hold": false }`. O adaptador aceita a habilidade automaticamente. O puxão é um toque, então `allow_hold: false`.
-2. **Gesto:** crie um reconhecedor com o mesmo contrato (`triggered`, `hold_released`, `holding`), como `GestureRecognizer` e `PinchRecognizer`.
-3. **Ligação:** em `main.py`, crie a constante da habilidade e chame `dispatch(sender, ABILITY, result)` com o resultado do reconhecedor. Passe `suppressed=...` para ele esperar os outros gestos terminarem. O envio já aceita várias habilidades ao mesmo tempo.
+2. **Gesto:** crie um reconhecedor com o mesmo contrato (`update`, `triggered`, `hold_released`, `holding`), como `GestureRecognizer` e `SweepRecognizer`.
+3. **Ligação:** em `main.py`, crie a constante da habilidade e chame `dispatch(sender, ABILITY, "RIGHT" ou "LEFT", result)` com o resultado do reconhecedor. O envio já aceita várias habilidades ao mesmo tempo, cada uma com a sua mão.
 
 Duas habilidades não podem compartilhar a mesma tecla.
 
@@ -114,8 +188,8 @@ Duas habilidades não podem compartilhar a mesma tecla.
 2. `mode: keyboard` e `window_title_contains: "Bloco de Notas"`: empurre e mantenha a mão aberta e estendida. O Bloco de Notas deve repetir `2` (repetição de tecla do Windows enquanto segura). Feche a mão e a repetição para.
 3. Durante o segurar, clique em outra janela: a tecla deve ser solta (perda de foco).
 4. Durante o segurar, feche a janela da webcam à força: em até 0,5 s a tecla deve ser solta (watchdog).
-5. Lentidão: no modo `dry_run`, faça a pinça. O painel mostra `SLOW: HOLDING` e `ADAPTER: DRY_RUN (SLOW)`; ao abrir a pinça, `RELEASED (SLOW)`. No Bloco de Notas, segurar a pinça repete `1`.
-6. Confirme que os gestos não se confundem: a pinça nunca arma o empurrão e a palma aberta nunca dispara a lentidão.
+5. Lentidão: no modo `dry_run`, com a mão esquerda, faça a varrida para a direita. O painel mostra `SLOW: HOLDING` e `ADAPTER: DRY_RUN (SLOW)`; ao parar a mão, `RELEASED (SLOW)`. No Bloco de Notas, a tecla `1` repete enquanto você move a mão e para quando ela para.
+6. Confirme a independência das mãos: empurrar com a direita e varrer com a esquerda ao mesmo tempo.
 7. Volte `window_title_contains` para `Jedi` e teste no jogo, numa área segura.
 
 Se o jogo rodar como administrador, o adaptador também precisa rodar como administrador (UIPI).
@@ -153,6 +227,8 @@ Cada conexão TCP carrega uma mensagem JSON terminada por `\n`:
 
 ## Testes automatizados
 
+Para avaliar o empurrão com os seus valores do `settings.json`, sem webcam: `.\.venv\Scripts\python.exe tools\evaluate_push.py` (use `--jitter 3` para simular tracking mais ruidoso).
+
 `.\.venv\Scripts\python.exe -m pytest -q`
 
 Não dependem do Windows nem de webcam: o `KeyboardBackend` é testado com foco, teclas e relógio simulados.
@@ -167,8 +243,10 @@ jfo-hand-tracking/
 ├── communication/
 │   ├── client.py
 │   └── async_sender.py    # envio em thread, heartbeats e STOP com reenvio
-├── hand_tracking/         # câmera, detector, gestos (empurrão), pinch (lentidão), landmarks
+├── hand_tracking/         # câmera, detector (duas mãos), gestures (empurrão), sweep (lentidão), landmarks
 ├── tests/
+├── tools/
+│   └── evaluate_push.py   # simula o empurrão sem webcam (falsos disparos, atraso)
 ├── config/settings.json
 ├── main.py
 └── requirements.txt
@@ -178,6 +256,7 @@ jfo-hand-tracking/
 
 - A injeção é por teclado (`SendInput` com scancodes). Não há integração com UE4SS.
 - Não há retorno do jogo: o adaptador não sabe se a habilidade realmente foi executada.
-- O reconhecedor do empurrão usa a escala 2D da palma como pista principal; girar a mão pode gerar falsos positivos ocasionais.
-- A pinça pode ser mais difícil de detectar com a mão de lado ou muito longe da câmera; ajuste `pinch_close_ratio` e `stability_seconds`.
+- O empurrão se baseia no crescimento 2D da palma (com o `z` do MediaPipe como apoio). A rejeição de rotação e de inclinação lenta foi medida só em simulação; valide com a sua mão e câmera.
+- O MediaPipe às vezes rotula as duas mãos igual quando elas se aproximam ou se cruzam (a varrida atravessa o corpo); nesse caso só a detecção mais confiável é usada e o gesto pode falhar naquele instante.
+- Rastrear duas mãos usa um pouco mais de CPU; se o FPS cair, desative a lentidão (`slow_gesture.enabled: false`) ou reduza `processing_width`.
 - Durante o segurar, se o reconhecimento de "palma aberta" falhar por mais de `hold_release_seconds` (dedos dobrando no movimento), a tecla é solta.

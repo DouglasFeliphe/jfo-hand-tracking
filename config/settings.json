@@ -7,7 +7,7 @@
     "mirror": true
   },
   "tracking": {
-    "max_hands": 1,
+    "max_hands": 2,
     "model_complexity": 0,
     "detection_confidence": 0.7,
     "tracking_confidence": 0.65,
@@ -18,17 +18,23 @@
   "gestures": {
     "open_palm_angle": 150.0,
     "thumb_spread_ratio": 0.42,
-    "arm_stability_seconds": 0.35,
-    "scale_trigger_ratio": 1.08,
-    "scale_strong_ratio": 1.18,
+    "arm_stability_seconds": 0.2,
+    "scale_trigger_ratio": 1.07,
+    "scale_strong_ratio": 1.15,
     "z_trigger_delta": 0.004,
-    "cooldown_seconds": 0.8,
+    "cooldown_seconds": 0.5,
     "smoothing_samples": 3,
     "hold_enabled": true,
     "hold_release_ratio": 1.04,
     "hold_release_seconds": 0.15,
     "hold_lost_grace_seconds": 0.15,
-    "pinch_exclusion_ratio": 0.4
+    "push_window_seconds": 0.3,
+    "anisotropy_tolerance": 1.0,
+    "rearm_on_retract": true,
+    "adaptive_threshold": true,
+    "noise_k": 4.0,
+    "min_scale_trigger": 1.06,
+    "max_scale_trigger": 1.12
   },
   "display": {
     "window_title": "JFO Hand Tracking - Phase 4",
@@ -42,7 +48,7 @@
     "heartbeat_seconds": 0.15
   },
   "game": {
-    "mode": "keyboard",
+    "mode": "dry_run",
     "window_title_contains": "Jedi",
     "auth_token": "26645869a7e60248a83c917f985033c3",
     "min_interval_seconds": 0.5,
@@ -63,13 +69,19 @@
   },
   "slow_gesture": {
     "enabled": true,
-    "pinch_close_ratio": 0.35,
-    "pinch_open_ratio": 0.4,
+    "hand": "Left",
+    "direction": "right",
     "finger_extended_angle": 150.0,
-    "stability_seconds": 0.2,
-    "cooldown_seconds": 0.4,
-    "hold_enabled": true,
-    "hold_release_seconds": 0.15,
-    "hold_lost_grace_seconds": 0.15
+    "start_speed": 3.0,
+    "min_travel": 0.6,
+    "stop_speed": 1.2,
+    "stop_seconds": 0.12,
+    "horizontal_dominance": 1.5,
+    "velocity_window_seconds": 0.12,
+    "candidate_timeout_seconds": 0.5,
+    "min_tracking_seconds": 0.3,
+    "max_hold_seconds": 2.0,
+    "cooldown_seconds": 0.5,
+    "hold_lost_grace_seconds": 0.1
   }
 }
